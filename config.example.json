@@ -1,0 +1,11 @@
+{
+  "name": "WHOOP",
+  "address": null,
+  "max_hr": 190,
+  "position": "top-left",
+  "margin": 24,
+  "opacity": 0.96,
+  "scale": 1.0,
+  "fps": 60,
+  "movable": false
+}
