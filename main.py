@@ -46,6 +46,26 @@ def _ensure_console() -> None:
         pass
 
 
+def _make_tray_icon():
+    """A small red heart drawn at runtime (no icon file to bundle)."""
+    from PySide6 import QtCore, QtGui
+
+    pm = QtGui.QPixmap(64, 64)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+    cx, cy, s = 32.0, 34.0, 22.0
+    path = QtGui.QPainterPath()
+    path.moveTo(cx, cy + s * 0.72)
+    path.cubicTo(cx - s * 1.45, cy - s * 0.25, cx - s * 0.6, cy - s * 1.2, cx, cy - s * 0.35)
+    path.cubicTo(cx + s * 0.6, cy - s * 1.2, cx + s * 1.45, cy - s * 0.25, cx, cy + s * 0.72)
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(QtGui.QColor("#ff4d5e"))
+    p.drawPath(path)
+    p.end()
+    return QtGui.QIcon(pm)
+
+
 def load_config(path: str | None) -> dict:
     """Load config.json: an explicit --config, else one next to the exe/script."""
     if path:
@@ -138,7 +158,50 @@ def main() -> None:
     from overlay import OverlayWindow
 
     app = QtWidgets.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # the tray keeps us alive; quit is explicit
+
+    # Single instance: if an older copy is running, tell it to exit first, so
+    # launching a new version always replaces the old one.
+    from PySide6.QtNetwork import QLocalServer, QLocalSocket
+
+    srv_name = "whoop-hr-overlay-singleton"
+    probe = QLocalSocket()
+    probe.connectToServer(srv_name)
+    if probe.waitForConnected(300):
+        probe.write(b"quit\n")
+        probe.flush()
+        probe.waitForBytesWritten(500)
+        probe.disconnectFromServer()
+        QtCore.QThread.msleep(800)  # let it release its window + Bluetooth
+    QLocalServer.removeServer(srv_name)
+    server = QLocalServer()
+    server.listen(srv_name)
+
+    def on_peer() -> None:
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+
+        def read() -> None:
+            if bytes(conn.readAll()).strip() == b"quit":
+                QtWidgets.QApplication.quit()
+
+        conn.readyRead.connect(read)
+        if conn.bytesAvailable():
+            read()
+
+    server.newConnection.connect(on_peer)
+
     win = OverlayWindow(opts)
+
+    # System-tray icon: the always-available way to quit (the overlay itself
+    # is click-through and has no taskbar entry).
+    tray = QtWidgets.QSystemTrayIcon(_make_tray_icon(), app)
+    tray.setToolTip("WHOOP HR Overlay (right-click to quit)")
+    menu = QtWidgets.QMenu()
+    menu.addAction("Quit WHOOP HR Overlay", QtWidgets.QApplication.quit)
+    tray.setContextMenu(menu)
+    tray.show()
 
     class Bridge(QtCore.QObject):
         bpm = QtCore.Signal(int)

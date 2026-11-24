@@ -187,7 +187,13 @@ Every option is a CLI flag, and you can make settings permanent by copying
 
 **Zone colors** (by % of max HR): 🔵 recovery · 🟦 warm-up · 🟢 aerobic · 🟡 tempo · 🟠 threshold · 🔴 max.
 
-**Controls:** press **Esc** while the overlay has focus to quit (in normal click-through mode, close the console window or Ctrl-C it).
+**Quitting:** the overlay is click-through and stays off the taskbar, so it lives in the
+**system tray** (the ^ area by the clock) as a small red heart. **Right-click it → Quit.**
+Launching a new copy (e.g. a newer version) automatically closes the old one.
+
+**Not connected?** The panel shows the nearest Bluetooth devices your PC can hear. If no
+`WHOOP …` line appears, the band isn't broadcasting near this PC: start **Broadcast Heart Rate**
+in the WHOOP app and wear the band.
 
 ---
 

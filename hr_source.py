@@ -224,14 +224,19 @@ class BleHeartRateSource(HeartRateSource):
             self._log("no HR advertiser; trying nearest WHOOP by name")
             return whoop_candidates[0][1]
 
-        # nothing matched -> surface a hint on the overlay itself
-        named = sorted([s for s in seen if s[1] != "(unnamed)"], reverse=True)
+        # nothing matched -> show the nearest devices right on the overlay so
+        # the user can see whether the WHOOP is even broadcasting (no log file)
+        top = sorted(seen, reverse=True)[:4]
+        lines = [
+            f"- {nm}  ({rssi}dBm){'  HR' if hr else ''}"
+            for rssi, nm, addr, hr in top
+        ]
+        listing = "\n".join(lines) if lines else "(no BLE devices seen)"
         if self._name:
-            self._on_status(f"no device named '{self._name}' found")
-        elif named:
-            self._on_status(f"no HR match. Nearest: {named[0][1]}")
+            header = f"No '{self._name}' nearby. Seeing:"
         else:
-            self._on_status(f"no HR device found ({len(seen)} nearby)")
+            header = f"No WHOOP broadcast found. {len(seen)} devices near:"
+        self._on_status(header + "\n" + listing)
         return None
 
     async def _main(self) -> None:

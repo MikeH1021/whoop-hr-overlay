@@ -162,41 +162,39 @@ class OverlayWindow(QtWidgets.QWidget):
         heart_scale = 1.0 + 0.20 * self.beat_env
         self._draw_heart(p, 30 * s, h * 0.42, 12 * s * heart_scale, col)
 
-        # big bpm number
-        num = str(self.current) if self.current else "--"
-        f_num = QtGui.QFont("Segoe UI", int(27 * s))
-        f_num.setBold(True)
-        p.setFont(f_num)
-        p.setPen(QtGui.QColor(246, 248, 251))
-        p.drawText(
-            QtCore.QRectF(48 * s, 6 * s, 86 * s, h - 30 * s),
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-            num,
-        )
-        # "BPM" + status line under the number
         f_small = QtGui.QFont("Segoe UI", int(8 * s))
         f_small.setBold(True)
-        p.setFont(f_small)
-        p.setPen(QtGui.QColor(150, 160, 176))
-        p.drawText(
-            QtCore.QRectF(49 * s, h - 26 * s, 90 * s, 20 * s),
-            QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
-            "BPM",
-        )
 
-        # rolling sparkline
-        gx, gy = 140 * s, 14 * s
-        gw, gh = w - gx - 14 * s, h - 28 * s
-        self._draw_sparkline(p, gx, gy, gw, gh, col)
-
-        # before the first reading arrives, show the connection status in the
-        # graph area so a double-clicked (console-less) exe still explains itself
-        if not self.current:
+        if self.current:
+            # connected: big number + "BPM" + rolling graph
+            f_num = QtGui.QFont("Segoe UI", int(27 * s))
+            f_num.setBold(True)
+            p.setFont(f_num)
+            p.setPen(QtGui.QColor(246, 248, 251))
+            p.drawText(
+                QtCore.QRectF(48 * s, 6 * s, 86 * s, h - 30 * s),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                str(self.current),
+            )
             p.setFont(f_small)
             p.setPen(QtGui.QColor(150, 160, 176))
             p.drawText(
-                QtCore.QRectF(gx, gy, gw, gh),
-                QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap,
+                QtCore.QRectF(49 * s, h - 26 * s, 90 * s, 20 * s),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                "BPM",
+            )
+            gx, gy = 140 * s, 14 * s
+            gw, gh = w - gx - 14 * s, h - 28 * s
+            self._draw_sparkline(p, gx, gy, gw, gh, col)
+        else:
+            # not connected: show live status / nearby devices on the panel
+            # itself, so diagnosing never needs a log file
+            f_diag = QtGui.QFont("Segoe UI", max(6, int(7 * s)))
+            p.setFont(f_diag)
+            p.setPen(QtGui.QColor(190, 198, 210))
+            p.drawText(
+                QtCore.QRectF(48 * s, 7 * s, w - 58 * s, h - 12 * s),
+                QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
                 self.status,
             )
 
