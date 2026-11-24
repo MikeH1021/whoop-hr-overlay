@@ -1,6 +1,6 @@
 {
-  "name": "WHOOP",
-  "address": null,
+  "serial": null,
+  "configure_band": true,
   "max_hr": 190,
   "position": "top-left",
   "margin": 24,

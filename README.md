@@ -43,6 +43,25 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
 - **No hardware? No problem** — `--simulate` mode gives a realistic fake signal so you can place and style it first.
 - **Configurable** — corner, size, opacity, max-HR, colors-by-zone — via flags or a `config.json`.
 
+## 🔌 Direct WHOOP mode (default, v0.2+)
+
+The overlay talks to your WHOOP 5.0/MG **directly over its own Bluetooth protocol**. No phone
+relay, no WHOOP app. Put your band's serial in `config.json` next to the exe:
+
+```json
+{ "serial": "MGB0663331" }
+```
+
+On connect it sends the WHOOP handshake, turns on live heart rate (command 3), and reads HR
+from the band's live-HR packets (or the standard HR channel, whichever arrives). With
+`"configure_band": true` (the default) it also turns on two of the band's own sharing settings,
+`make_hrfm_visible` and `whoop_live_2_hrm_devices`, so the band can share HR with a second device
+while it stays connected to your phone. Set it to `false` to leave the band's settings untouched.
+
+It **only ever connects to the serial you configure**. With no serial set, it just lists the
+WHOOPs in range so you can find yours, and never connects to (or changes) anyone else's band.
+Use `--standard` to read any ordinary Bluetooth HR strap instead.
+
 ## 🩺 Getting heart rate out of your WHOOP
 
 This overlay speaks the **standard BLE Heart Rate profile**, the same one gym equipment uses.

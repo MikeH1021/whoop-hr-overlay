@@ -26,6 +26,7 @@ import os
 import random
 import sys
 import threading
+import time
 from typing import Callable, List, Optional, Tuple
 
 HR_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
@@ -295,6 +296,220 @@ class BleHeartRateSource(HeartRateSource):
             except Exception:
                 pass
         self._on_status("disconnected")
+        self._log("disconnected")
+
+
+WHOOP_SVC = "fd4b0001-cce1-4033-93ce-002d5875f58a"
+WHOOP_CMD = "fd4b0002-cce1-4033-93ce-002d5875f58a"
+WHOOP_NOTIFY = [f"fd4b000{n}-cce1-4033-93ce-002d5875f58a" for n in (3, 4, 5, 7)]
+
+# Band settings that make it share HR with a second device while it stays
+# connected to its phone: (set_cmd, read_cmd, key)
+SHARING_SETTINGS = (
+    (120, 128, "make_hrfm_visible"),         # feature flag: expose standard HR service
+    (119, 121, "whoop_live_2_hrm_devices"),  # device config: allow a 2nd HR connection
+)
+
+
+def hr_from_whoop_frame(frame: bytes) -> Optional[int]:
+    """Live bpm from a verified WHOOP 5/MG frame, or None.
+
+    * packet type 40 (live HR + R-R): bpm at byte 16
+    * R18 biometric summary (layout byte 9 == 18, 124 bytes): bpm at byte 22
+    """
+    if len(frame) < 20:
+        return None
+    if frame[8] == 40:
+        bpm = frame[16]
+    elif frame[9] == 18 and len(frame) >= 124 and frame[8] != 36:
+        bpm = frame[22]
+    else:
+        return None
+    return bpm if 25 <= bpm <= 230 else None
+
+
+class WhoopDirectSource(HeartRateSource):
+    """Talk to a WHOOP 5/MG band directly over its own protocol.
+
+    On connect it: subscribes to the standard 0x2A37 channel (if present) and the
+    WHOOP notify channels, sends the client hello, optionally turns on the band's
+    HR-sharing settings (so it keeps sharing HR alongside its phone afterwards),
+    and switches on realtime HR (command 3). HR is taken from whichever channel
+    produces it.
+    """
+
+    def __init__(
+        self,
+        on_bpm: Callable[[int], None],
+        on_status: Optional[Callable[[str], None]] = None,
+        serial: Optional[str] = None,
+        scan_timeout: float = 6.0,
+        configure_band: bool = True,
+        log_path: Optional[str] = None,
+    ) -> None:
+        super().__init__(on_bpm, on_status, log_path=log_path)
+        self._serial = (serial or "").strip()
+        self._scan_timeout = scan_timeout
+        self._configure = configure_band
+        self._seq = 0
+
+    # -- discovery -----------------------------------------------------------
+    async def _discover(self):
+        from bleak import BleakScanner
+
+        want = self._serial
+        self._on_status(f"Looking for WHOOP {want}..." if want else "Scanning for WHOOPs...")
+        found = await BleakScanner.discover(timeout=self._scan_timeout, return_adv=True)
+        if not want:
+            # No serial configured: list the WHOOPs in range and ask the user to
+            # pick theirs. Never auto-connect to one.
+            whoops = sorted(
+                ((adv.rssi or -999, adv.local_name or d.name or "")
+                 for d, adv in found.values()
+                 if "whoop" in (adv.local_name or d.name or "").lower()),
+                reverse=True,
+            )
+            listing = "\n".join(f"- {n}  ({r}dBm)" for r, n in whoops[:4]) or "(none in range)"
+            self._on_status("Set your band's serial in config.json\n"
+                            f'("serial": "MGB..."). WHOOPs in range:\n{listing}')
+            return None
+        cands, seen = [], []
+        for addr, (dev, adv) in found.items():
+            nm = adv.local_name or dev.name or ""
+            uuids = [u.lower() for u in (adv.service_uuids or [])]
+            rssi = adv.rssi if adv.rssi is not None else -999
+            seen.append((rssi, nm or "(unnamed)", str(addr), HR_SERVICE_UUID in uuids))
+            is_whoop = "whoop" in nm.lower() or WHOOP_SVC in uuids
+            # Only ever connect to the band the user configured -- never a
+            # neighbour's WHOOP that happens to be in range.
+            if not is_whoop or not self._serial or self._serial.lower() not in nm.lower():
+                continue
+            cands.append((rssi, nm, dev))
+        for rssi, nm, addr, hr in sorted(seen, reverse=True):
+            self._log(f"  {rssi:>4} dBm  {addr}  {nm}{'  [HR]' if hr else ''}")
+        if cands:
+            cands.sort(key=lambda c: c[0], reverse=True)
+            self._log(f"picked {cands[0][1]} ({cands[0][0]} dBm)")
+            return cands[0][2]
+        top = sorted(seen, reverse=True)[:4]
+        listing = "\n".join(f"- {n}  ({r}dBm)" for r, n, _a, _h in top) or "(nothing)"
+        self._on_status(
+            f"{want} not broadcasting (connected to your phone?). Seeing:\n{listing}"
+        )
+        return None
+
+    # -- protocol helpers ----------------------------------------------------
+    async def _command(self, client, pending, cmd: int, body: bytes = b"",
+                       timeout: float = 5.0):
+        import whoop_framing as wf
+
+        self._seq = (self._seq + 1) & 0xFF
+        seq = self._seq
+        fut = asyncio.get_running_loop().create_future()
+        pending[(cmd, seq)] = fut
+        try:
+            await client.write_gatt_char(
+                WHOOP_CMD, wf.build_command_frame(cmd, seq, body), response=True
+            )
+            return await asyncio.wait_for(fut, timeout)
+        except Exception:
+            return None
+        finally:
+            pending.pop((cmd, seq), None)
+
+    @staticmethod
+    def _field(text: str) -> bytes:
+        return text.encode()[:31].ljust(32, b"\x00")
+
+    async def _configure_sharing(self, client, pending) -> None:
+        for set_cmd, read_cmd, key in SHARING_SETTINGS:
+            r = await self._command(client, pending, read_cmd, b"\x01" + self._field(key))
+            cur = None
+            if r is not None and r.result == 1 and len(r.body) >= 65:
+                cur = r.body[33:65].split(b"\x00", 1)[0].decode(errors="replace")
+            self._log(f"setting {key} = {cur!r}")
+            if cur == "1":
+                continue
+            w = await self._command(
+                client, pending, set_cmd, b"\x01" + self._field(key) + self._field("1")
+            )
+            self._log(f"set {key}=1 -> {w.result_name if w else 'timeout'}")
+
+    # -- main loop -----------------------------------------------------------
+    async def _main(self) -> None:
+        while not self._stop.is_set():
+            try:
+                device = await self._discover()
+                if device is None:
+                    await asyncio.sleep(2)
+                    continue
+                await self._stream(device)
+            except Exception as exc:
+                self._on_status(f"reconnecting ({exc})")
+                self._log(f"error: {exc!r}")
+                await asyncio.sleep(2)
+
+    async def _stream(self, device) -> None:
+        from bleak import BleakClient
+        import whoop_framing as wf
+
+        label = getattr(device, "name", None) or "WHOOP"
+        self._on_status(f"Connecting to {label}...")
+        self._log(f"connecting to {label}")
+        pending: dict = {}
+        reasm = {u: wf.Reassembler() for u in WHOOP_NOTIFY}
+        got = {"n": 0}
+
+        def emit(bpm: int, src: str) -> None:
+            if got["n"] == 0:
+                self._log(f"first HR {bpm} bpm via {src}")
+            got["n"] += 1
+            self._emit(bpm)
+
+        def on_std(_c, data: bytearray) -> None:
+            bpm = parse_hr_measurement(bytes(data))
+            if bpm:
+                emit(bpm, "0x2A37")
+
+        def on_whoop(char, data: bytearray) -> None:
+            uuid = getattr(char, "uuid", str(char)).lower()
+            r = reasm.setdefault(uuid, wf.Reassembler())
+            for frame in r.feed(bytes(data)):
+                if not wf.verify_frame(frame):
+                    continue
+                if frame[8] == 36:  # command response
+                    resp = wf.Response(frame)
+                    fut = pending.get((resp.cmd, resp.origin_seq))
+                    if fut and not fut.done() and resp.result != 2:
+                        fut.set_result(resp)
+                    continue
+                bpm = hr_from_whoop_frame(frame)
+                if bpm:
+                    emit(bpm, f"WHOOP type {frame[8]}")
+
+        async with BleakClient(device, timeout=20.0) as client:
+            uuids = {c.uuid.lower() for s in client.services for c in s.characteristics}
+            if HR_MEASUREMENT_UUID in uuids:
+                await client.start_notify(HR_MEASUREMENT_UUID, on_std)
+            for u in WHOOP_NOTIFY:
+                if u in uuids:
+                    await client.start_notify(u, on_whoop)
+            if WHOOP_CMD in uuids:
+                await client.write_gatt_char(WHOOP_CMD, wf.CLIENT_HELLO, response=True)
+                await asyncio.sleep(0.5)
+                if self._configure:
+                    await self._configure_sharing(client, pending)
+                r = await self._command(client, pending, 3, b"\x01")
+                self._log(f"realtime HR on -> {r.result_name if r else 'timeout'}")
+            self._on_status(f"Connected to {label}. Waiting for heart rate\n"
+                            "(band must be on your wrist)")
+            last_kick = time.monotonic()
+            while not self._stop.is_set() and client.is_connected:
+                await asyncio.sleep(0.5)
+                if WHOOP_CMD in uuids and time.monotonic() - last_kick > 60:
+                    await self._command(client, pending, 3, b"\x01")
+                    last_kick = time.monotonic()
+        self._on_status("Disconnected, retrying...")
         self._log("disconnected")
 
 

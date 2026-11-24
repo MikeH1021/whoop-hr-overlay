@@ -109,6 +109,9 @@ def main() -> None:
     )
     ap.add_argument("--simulate", action="store_true",
                     help="use a fake HR signal instead of BLE (great for testing)")
+    ap.add_argument("--serial", help="your WHOOP's serial, e.g. MGB0663331 (default: nearest WHOOP)")
+    ap.add_argument("--standard", action="store_true",
+                    help="use any standard BLE heart-rate sensor instead of a WHOOP")
     ap.add_argument("--address", help="connect to this BLE address directly")
     ap.add_argument("--name", help="connect to the first device whose name contains this")
     ap.add_argument("--list", action="store_true",
@@ -153,6 +156,7 @@ def main() -> None:
     from hr_source import (
         BleHeartRateSource,
         SimulatedHeartRateSource,
+        WhoopDirectSource,
         default_log_path,
     )
     from overlay import OverlayWindow
@@ -211,8 +215,21 @@ def main() -> None:
     bridge.bpm.connect(win.set_bpm)
     bridge.status.connect(win.set_status)
 
+    serial = args.serial or cfg.get("serial")
+    use_standard = args.standard or cfg.get("mode") == "standard" or (
+        not serial and (args.name or args.address or cfg.get("address"))
+    )
     if args.simulate:
         source = SimulatedHeartRateSource(bridge.bpm.emit, bridge.status.emit)
+    elif not use_standard:
+        # default: talk to the WHOOP directly over its own protocol
+        source = WhoopDirectSource(
+            bridge.bpm.emit,
+            bridge.status.emit,
+            serial=serial,
+            configure_band=bool(cfg.get("configure_band", True)),
+            log_path=default_log_path(),
+        )
     else:
         source = BleHeartRateSource(
             bridge.bpm.emit,
