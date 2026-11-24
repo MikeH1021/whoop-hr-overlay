@@ -1,0 +1,81 @@
+name: Build Windows EXE
+
+# Builds a standalone Windows .exe on a GitHub-hosted Windows runner and
+# attaches it to a GitHub Release. Triggers when you push a version tag
+# (e.g. v0.1.0), or manually from the Actions tab.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build standalone exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name whoop-hr-overlay
+          --collect-all bleak
+          main.py
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          Copy-Item config.example.json dist\config.example.json
+          Copy-Item README.md dist\README.md
+          Compress-Archive -Path dist\whoop-hr-overlay.exe, dist\config.example.json, dist\README.md -DestinationPath whoop-hr-overlay-windows.zip -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whoop-hr-overlay-windows
+          path: |
+            dist/whoop-hr-overlay.exe
+            whoop-hr-overlay-windows.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/whoop-hr-overlay.exe
+            whoop-hr-overlay-windows.zip
+          body: |
+            ## WHOOP Heart Rate Overlay — Windows build
+
+            **Download `whoop-hr-overlay.exe`** below and double-click it. No Python needed.
+
+            It sits in the top-left corner showing your live heart rate + a 30-second graph,
+            and shows up in a **full-screen** Discord/OBS share.
+
+            ### First run
+            1. In the WHOOP app, enable **Heart Rate Broadcast** (or use any BLE HR strap).
+            2. Double-click `whoop-hr-overlay.exe`. It auto-connects to the nearest HR broadcaster.
+            3. To pin a specific strap or change the corner/size, drop a `config.json`
+               next to the exe (copy `config.example.json` and edit it).
+
+            ### Make it show in Discord
+            - Share your whole **Screen** (not an Application Window).
+            - Run the game in **Borderless / Windowed Fullscreen**.
+
+            Windows may warn that the exe is from an unknown publisher (it's unsigned) —
+            click **More info → Run anyway**. See the README for full docs and troubleshooting.
