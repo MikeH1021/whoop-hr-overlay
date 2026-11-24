@@ -34,7 +34,7 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name whoop-hr-overlay
-          --collect-all bleak
+          --collect-all bleak --collect-all bumble --collect-all libusb_package --hidden-import usb1 --hidden-import dongle_source
           main.py
 
       - name: Stage release files
@@ -59,6 +59,7 @@ jobs:
           files: |
             dist/whoop-hr-overlay.exe
             whoop-hr-overlay-windows.zip
+            firmware/hci_usb_nrf52840dongle_dfu.zip
           body: |
             ## WHOOP Heart Rate Overlay — Windows build
 

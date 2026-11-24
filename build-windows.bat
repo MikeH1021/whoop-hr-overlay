@@ -13,7 +13,7 @@ pip install -r requirements.txt pyinstaller
 
 pyinstaller --noconfirm --clean --onefile --windowed ^
     --name whoop-hr-overlay ^
-    --collect-all bleak ^
+    --collect-all bleak --collect-all bumble --collect-all libusb_package --hidden-import usb1 --hidden-import dongle_source ^
     main.py
 
 echo.

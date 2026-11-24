@@ -119,6 +119,8 @@ def main() -> None:
     ap.add_argument("--simulate", action="store_true",
                     help="use a fake HR signal instead of BLE (great for testing)")
     ap.add_argument("--serial", help="your WHOOP's serial, e.g. MGB0663331 (default: nearest WHOOP)")
+    ap.add_argument("--adapter", choices=["auto", "dongle", "system"],
+                    help="Bluetooth radio: auto (USB dongle if present), dongle, or system")
     ap.add_argument("--standard", action="store_true",
                     help="use any standard BLE heart-rate sensor instead of a WHOOP")
     ap.add_argument("--address", help="connect to this BLE address directly")
@@ -237,6 +239,16 @@ def main() -> None:
     )
     holder = {"source": None, "gen": 0}
 
+    # Which Bluetooth radio to use: "auto" picks a Zephyr hci_usb USB dongle
+    # (driven directly via Bumble) when one is plugged in, else the OS radio.
+    want_adapter = str(args.adapter or cfg.get("adapter", "auto")).lower()
+    adapter = {"kind": "system"}
+    if not args.simulate and want_adapter in ("auto", "dongle"):
+        from dongle_source import dongle_present
+
+        if want_adapter == "dongle" or dongle_present():
+            adapter["kind"] = "dongle"
+
     def make_source(serial_):
         # Callbacks are tied to this source's generation, so a stopped source
         # that is still finishing a scan can't overwrite the new one's status.
@@ -252,6 +264,16 @@ def main() -> None:
 
         if args.simulate:
             return SimulatedHeartRateSource(on_bpm, on_status)
+        if not use_standard and adapter["kind"] == "dongle":
+            from dongle_source import WhoopDongleSource
+
+            return WhoopDongleSource(
+                on_bpm,
+                on_status,
+                serial=serial_,
+                configure_band=bool(cfg.get("configure_band", True)),
+                log_path=default_log_path(),
+            )
         if not use_standard:
             # default: talk to the WHOOP directly over its own protocol
             return WhoopDirectSource(
@@ -302,6 +324,9 @@ def main() -> None:
             a.triggered.connect(lambda _=False, n=nm: switch_band(n))
 
     pick.aboutToShow.connect(fill_picker)
+    radio = menu.addAction("Bluetooth: USB dongle" if adapter["kind"] == "dongle"
+                           else "Bluetooth: built-in (system)")
+    radio.setEnabled(False)
     menu.addSeparator()
     menu.addAction("Quit WHOOP HR Overlay", QtWidgets.QApplication.quit)
     tray.setContextMenu(menu)
