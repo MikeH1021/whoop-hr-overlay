@@ -48,9 +48,14 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
 This overlay speaks the **standard BLE Heart Rate profile**, the same one gym equipment uses.
 
 1. In the **WHOOP app**, turn on **Heart Rate Broadcast** (Bluetooth broadcasting). Your band
-   then advertises as a standard HR strap that anything can read.
-2. Run the overlay. It auto-discovers the strongest nearby HR broadcaster, or you can target
-   yours by name/address (see below).
+   then advertises as a standard HR strap that anything can read. It broadcasts under the name
+   **`WHOOP <serial>`** (e.g. `WHOOP MGB0680949`).
+2. **Wear the band, snug, during use.** This is the #1 gotcha: a WHOOP only *streams* heart
+   rate while it's on your wrist detecting a pulse. Sitting on a desk, it will happily connect
+   but send **no numbers** and then drop the link after a few seconds.
+3. Run the overlay. It auto-discovers the nearest HR broadcaster, falling back to the nearest
+   device named `WHOOP*`. If several WHOOPs are nearby (yours + neighbors'), target yours
+   explicitly by putting its name in `config.json`, e.g. `"name": "WHOOP MGB0680949"`.
 
 > **No broadcast on your unit?** Any standard Bluetooth HR strap works as a stand-in, and the
 > companion research toolkit in this repo's sibling project (`../whoop/`) can pull live HR
@@ -193,7 +198,10 @@ Every option is a CLI flag, and you can make settings permanent by copying
 | **Overlay not in my Discord share** | You're sharing an *Application Window* — switch to sharing the **Screen**. And put the game in **Borderless** mode. |
 | **Nothing shows over my game** | The game is in **exclusive fullscreen**. Switch to Windowed/Borderless Fullscreen. |
 | **`--list` finds nothing** | Make sure **Heart Rate Broadcast** is enabled in the WHOOP app and the band is awake/worn. Only one app can hold the HR connection at a time — close other apps reading it. |
-| **Connects, but no number appears** | Something else may already be subscribed to the strap. Disconnect it there, or in the WHOOP app, then relaunch. |
+| **Status says "Bluetooth radio is not powered on"** | Windows is reporting the BLE radio as off. Toggle Bluetooth off/on, make sure Airplane mode is off, check the adapter in Device Manager, and restart the *Bluetooth Support Service* (`services.msc`). The overlay auto-retries, so you don't need to relaunch. |
+| **Connects ("connected: WHOOP …") but the number stays `--`** | The band isn't sending beats — almost always because it **isn't being worn**. Put it on snug with good skin contact. (Confirmed behavior: an idle WHOOP connects, streams nothing, then disconnects.) Also make sure the phone WHOOP app isn't holding the connection. |
+| **Sits on "scanning…" / "no HR match"** | Your band isn't advertising the HR service. Put its exact name in `config.json` (`"name": "WHOOP <serial>"`) to match by name instead of by service. |
+| **Want to see what it's doing** | Check **`whoop-overlay.log`**, written next to the exe — it logs every scan (all nearby devices), connections, and whether the HR data channel was found. Send me that file if you're stuck. |
 | **It's too small / too big** | Use `--scale 1.5` (bigger) or `0.8` (smaller). |
 | **Can't reposition it** | Run once with `--movable`, drag it where you want, note the corner, then relaunch with `--position`. |
 | **`py` is not recognized** | Install Python from python.org with *Add to PATH* checked, or replace `py -3` with `python`. |

@@ -18,11 +18,36 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+def base_dir() -> str:
+    """Folder to look for config.json / write logs: next to the exe when
+    frozen by PyInstaller, else next to this script."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+HERE = base_dir()
+
+
+def _ensure_console() -> None:
+    """A --windowed exe has no console, so --list output goes nowhere. On
+    Windows, attach/allocate one and reopen stdout so prints are visible."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        if k32.GetConsoleWindow() == 0 and not k32.AttachConsole(-1):
+            k32.AllocConsole()
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+        sys.stderr = sys.stdout
+    except Exception:
+        pass
 
 
 def load_config(path: str | None) -> dict:
-    """Load config.json: an explicit --config, else one next to this file."""
+    """Load config.json: an explicit --config, else one next to the exe/script."""
     if path:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as fh:
@@ -84,6 +109,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.list:
+        _ensure_console()  # windowed exe has no console; make one so prints show
         from hr_source import list_devices
 
         print("Scanning for BLE heart-rate devices...\n")
@@ -93,6 +119,10 @@ def main() -> None:
         for rssi, addr, name, is_hr in rows:
             tag = "  <- Heart Rate service" if is_hr else ""
             print(f"  {rssi:>4} dBm   {addr}   {name}{tag}")
+        try:
+            input("\nDone. Press Enter to close...")
+        except Exception:
+            pass
         return
 
     cfg = load_config(args.config)
@@ -100,7 +130,11 @@ def main() -> None:
 
     from PySide6 import QtCore, QtWidgets
 
-    from hr_source import BleHeartRateSource, SimulatedHeartRateSource
+    from hr_source import (
+        BleHeartRateSource,
+        SimulatedHeartRateSource,
+        default_log_path,
+    )
     from overlay import OverlayWindow
 
     app = QtWidgets.QApplication(sys.argv)
@@ -123,6 +157,7 @@ def main() -> None:
             address=(args.address or cfg.get("address")),
             name=(args.name or cfg.get("name")),
             scan_timeout=args.scan_timeout,
+            log_path=default_log_path(),
         )
 
     source.start()
