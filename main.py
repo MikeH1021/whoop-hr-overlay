@@ -235,23 +235,35 @@ def main() -> None:
     use_standard = args.standard or cfg.get("mode") == "standard" or (
         not serial and (args.name or args.address or cfg.get("address"))
     )
-    holder = {"source": None}
+    holder = {"source": None, "gen": 0}
 
     def make_source(serial_):
+        # Callbacks are tied to this source's generation, so a stopped source
+        # that is still finishing a scan can't overwrite the new one's status.
+        gen = holder["gen"]
+
+        def on_bpm(b):
+            if holder["gen"] == gen:
+                bridge.bpm.emit(b)
+
+        def on_status(s):
+            if holder["gen"] == gen:
+                bridge.status.emit(s)
+
         if args.simulate:
-            return SimulatedHeartRateSource(bridge.bpm.emit, bridge.status.emit)
+            return SimulatedHeartRateSource(on_bpm, on_status)
         if not use_standard:
             # default: talk to the WHOOP directly over its own protocol
             return WhoopDirectSource(
-                bridge.bpm.emit,
-                bridge.status.emit,
+                on_bpm,
+                on_status,
                 serial=serial_,
                 configure_band=bool(cfg.get("configure_band", True)),
                 log_path=default_log_path(),
             )
         return BleHeartRateSource(
-            bridge.bpm.emit,
-            bridge.status.emit,
+            on_bpm,
+            on_status,
             address=(args.address or cfg.get("address")),
             name=(args.name or cfg.get("name")),
             scan_timeout=args.scan_timeout,
@@ -263,6 +275,7 @@ def main() -> None:
         cfg["serial"] = serial_
         save_config(cfg)
         old = holder["source"]
+        holder["gen"] += 1  # silence the old source immediately
         if old is not None:
             old.stop()
         win.set_status(f"Switching to {name}...")
@@ -301,7 +314,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 
 class LanBeacon:

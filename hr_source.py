@@ -446,7 +446,13 @@ class WhoopDirectSource(HeartRateSource):
             self._log(f"  {rssi:>4} dBm  {addr}  {nm}{'  [HR]' if hr else ''}")
         if cands:
             cands.sort(key=lambda c: c[0], reverse=True)
-            self._log(f"picked {cands[0][1]} ({cands[0][0]} dBm)")
+            rssi = cands[0][0]
+            self._log(f"picked {cands[0][1]} ({rssi} dBm)")
+            if rssi < -88:
+                self._on_status(
+                    f"Found {cands[0][1]} but signal is very weak ({rssi} dBm).\n"
+                    "PC Bluetooth reception problem: check the antenna\n"
+                    "or use a USB Bluetooth adapter. Trying anyway...")
             return cands[0][2]
         top = sorted(seen, reverse=True)[:4]
         listing = "\n".join(f"- {n}  ({r}dBm)" for r, n, _a, _h in top) or "(nothing)"
