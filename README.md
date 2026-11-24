@@ -61,10 +61,33 @@ This overlay speaks the **standard BLE Heart Rate profile**, the same one gym eq
 
 ## 🪟 Install on Windows
 
+### Option A — download the .exe (easiest, no Python)
+
+1. Go to the [**Releases**](../../releases/latest) page.
+2. Download **`whoop-hr-overlay.exe`**.
+3. Double-click it. That's it — it auto-connects to the nearest Bluetooth heart-rate broadcaster.
+
+> Windows SmartScreen may say *"unknown publisher"* because the exe is unsigned — click
+> **More info → Run anyway**. (It's your own build; the source is right here.)
+
+To pin a specific strap or change the corner/size/colors, drop a **`config.json`** in the **same
+folder as the exe** (copy [`config.example.json`](config.example.json) and edit it — see
+[Configuration](#️-configuration)). You can also run it from a terminal with flags, e.g.
+`whoop-hr-overlay.exe --simulate` or `whoop-hr-overlay.exe --position top-right`.
+
+> No release yet? Push a version tag (`git tag v0.1.0 && git push origin v0.1.0`) or run the
+> **Build Windows EXE** workflow from the **Actions** tab — GitHub builds the exe on a Windows
+> runner and attaches it to a Release automatically. You can also build it yourself with
+> [`build-windows.bat`](build-windows.bat).
+
+---
+
+### Option B — run from source
+
 **Prerequisites:** Windows 10/11 with Bluetooth, and [Python 3.9+](https://www.python.org/downloads/windows/)
 (check **"Add Python to PATH"** during install).
 
-### Option A — one double-click (recommended)
+#### B1 — one double-click (recommended)
 
 1. Download / clone this folder onto your PC.
 2. Double-click **`run-overlay.bat`**.
@@ -78,7 +101,7 @@ run-overlay.bat --simulate
 run-overlay.bat --name WHOOP --position top-left
 ```
 
-### Option B — manual
+#### B2 — manual
 
 ```bat
 cd whoop-hr-overlay

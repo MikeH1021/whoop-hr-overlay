@@ -4,3 +4,7 @@ __pycache__/
 *.pyo
 config.json
 .DS_Store
+build/
+dist/
+*.spec
+*.zip

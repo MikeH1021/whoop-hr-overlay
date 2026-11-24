@@ -189,6 +189,17 @@ class OverlayWindow(QtWidgets.QWidget):
         gw, gh = w - gx - 14 * s, h - 28 * s
         self._draw_sparkline(p, gx, gy, gw, gh, col)
 
+        # before the first reading arrives, show the connection status in the
+        # graph area so a double-clicked (console-less) exe still explains itself
+        if not self.current:
+            p.setFont(f_small)
+            p.setPen(QtGui.QColor(150, 160, 176))
+            p.drawText(
+                QtCore.QRectF(gx, gy, gw, gh),
+                QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap,
+                self.status,
+            )
+
     def _draw_heart(self, p, cx, cy, size, color) -> None:
         path = QtGui.QPainterPath()
         path.moveTo(cx, cy + size * 0.72)
