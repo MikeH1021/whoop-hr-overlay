@@ -32,6 +32,65 @@ from typing import Callable, List, Optional, Tuple
 HR_SERVICE_UUID = "0000180d-0000-1000-8000-00805f9b34fb"
 HR_MEASUREMENT_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
 
+WHOOP_COMPANY_ID = 816  # manufacturer-data id seen on WHOOP 5/MG adverts
+
+
+def looks_like_whoop(name: str, uuids, mfg_ids) -> bool:
+    """A WHOOP can be renamed (e.g. "W MGB0663331"), so never rely on the word
+    "whoop": check the WHOOP service, the manufacturer id, or a serial-shaped
+    last word (MGB..., 5AM..., 5B0...)."""
+    if "fd4b0001-cce1-4033-93ce-002d5875f58a" in uuids or WHOOP_COMPANY_ID in mfg_ids:
+        return True
+    n = (name or "").strip()
+    last = n.split()[-1] if n else ""
+    return "whoop" in n.lower() or (
+        len(last) == 10 and last[:3].isalnum() and last[-6:].isdigit()
+        and last[0] in "M5"
+    )
+
+
+# Every scan is published here as a list of dicts (addr, name, rssi, uuids,
+# mfg). main.py hooks it for the tray band-picker and the LAN diagnostics
+# beacon. Names are cached per address because Windows often delivers the
+# name in a later packet than the first one it reports.
+SCAN_LISTENERS: list = []
+NAME_CACHE: dict = {}
+
+
+async def scan_devices(timeout: float):
+    """Active BLE scan. Returns [(dev, adv, name, uuids, rssi)], strongest first."""
+    from bleak import BleakScanner
+
+    found = await BleakScanner.discover(
+        timeout=timeout, return_adv=True, scanning_mode="active"
+    )
+    rows = []
+    for addr, (dev, adv) in found.items():
+        nm = adv.local_name or dev.name or ""
+        if nm and nm != str(addr):
+            NAME_CACHE[str(addr)] = nm
+        nm = NAME_CACHE.get(str(addr), "")
+        uuids = [u.lower() for u in (adv.service_uuids or [])]
+        rssi = adv.rssi if adv.rssi is not None else -999
+        rows.append((dev, adv, nm, uuids, rssi))
+    rows.sort(key=lambda r: r[4], reverse=True)
+    report = [
+        {
+            "addr": str(getattr(d, "address", "")),
+            "name": nm,
+            "rssi": rssi,
+            "uuids": uuids,
+            "mfg": sorted((adv.manufacturer_data or {}).keys()),
+        }
+        for d, adv, nm, uuids, rssi in rows
+    ]
+    for fn in list(SCAN_LISTENERS):
+        try:
+            fn(report)
+        except Exception:
+            pass
+    return rows
+
 
 def default_log_path() -> Optional[str]:
     """A log file next to the exe (frozen) or this script (source)."""
@@ -206,7 +265,7 @@ class BleHeartRateSource(HeartRateSource):
             if not self._address and not self._name:
                 if has_hr:
                     hr_candidates.append((rssi, dev))
-                elif "whoop" in nm.lower():
+                elif looks_like_whoop(nm, uuids, list((adv.manufacturer_data or {}).keys())):
                     whoop_candidates.append((rssi, dev))
 
         # log everything we saw this pass, strongest signal first
@@ -352,34 +411,32 @@ class WhoopDirectSource(HeartRateSource):
         self._scan_timeout = scan_timeout
         self._configure = configure_band
         self._seq = 0
+        self._announced = False
 
     # -- discovery -----------------------------------------------------------
     async def _discover(self):
-        from bleak import BleakScanner
-
         want = self._serial
-        self._on_status(f"Looking for WHOOP {want}..." if want else "Scanning for WHOOPs...")
-        found = await BleakScanner.discover(timeout=self._scan_timeout, return_adv=True)
+        if not self._announced:
+            self._on_status(f"Looking for WHOOP {want}..." if want
+                            else "Scanning for WHOOPs...")
+            self._announced = True
+        rows = await scan_devices(self._scan_timeout)
         if not want:
-            # No serial configured: list the WHOOPs in range and ask the user to
-            # pick theirs. Never auto-connect to one.
-            whoops = sorted(
-                ((adv.rssi or -999, adv.local_name or d.name or "")
-                 for d, adv in found.values()
-                 if "whoop" in (adv.local_name or d.name or "").lower()),
-                reverse=True,
+            # No band chosen yet: list the WHOOPs in range. Never auto-connect.
+            whoops = [(r, n or "(unnamed WHOOP)") for _d, a, n, u, r in rows
+                      if looks_like_whoop(n, u, list((a.manufacturer_data or {}).keys()))]
+            listing = "\n".join(f"- {n}  ({r}dBm)" for r, n in whoops[:4])
+            self._on_status(
+                "Right-click the heart in the tray > Choose your WHOOP.\n"
+                + (f"WHOOPs in range:\n{listing}" if listing else
+                   f"No WHOOP broadcasting near this PC ({len(rows)} devices seen).")
             )
-            listing = "\n".join(f"- {n}  ({r}dBm)" for r, n in whoops[:4]) or "(none in range)"
-            self._on_status("Set your band's serial in config.json\n"
-                            f'("serial": "MGB..."). WHOOPs in range:\n{listing}')
             return None
         cands, seen = [], []
-        for addr, (dev, adv) in found.items():
-            nm = adv.local_name or dev.name or ""
-            uuids = [u.lower() for u in (adv.service_uuids or [])]
-            rssi = adv.rssi if adv.rssi is not None else -999
+        for dev, adv, nm, uuids, rssi in rows:
+            addr = getattr(dev, "address", "")
             seen.append((rssi, nm or "(unnamed)", str(addr), HR_SERVICE_UUID in uuids))
-            is_whoop = "whoop" in nm.lower() or WHOOP_SVC in uuids
+            is_whoop = looks_like_whoop(nm, uuids, list((adv.manufacturer_data or {}).keys()))
             # Only ever connect to the band the user configured -- never a
             # neighbour's WHOOP that happens to be in range.
             if not is_whoop or not self._serial or self._serial.lower() not in nm.lower():

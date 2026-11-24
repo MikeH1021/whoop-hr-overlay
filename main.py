@@ -80,6 +80,15 @@ def load_config(path: str | None) -> dict:
     return {}
 
 
+def save_config(cfg: dict) -> None:
+    """Write config.json next to the exe/script (used by the tray band picker)."""
+    try:
+        with open(os.path.join(HERE, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2)
+    except Exception:
+        pass
+
+
 def build_opts(args: argparse.Namespace, cfg: dict) -> dict:
     """CLI flags override config.json, which overrides built-in defaults."""
 
@@ -198,15 +207,6 @@ def main() -> None:
 
     win = OverlayWindow(opts)
 
-    # System-tray icon: the always-available way to quit (the overlay itself
-    # is click-through and has no taskbar entry).
-    tray = QtWidgets.QSystemTrayIcon(_make_tray_icon(), app)
-    tray.setToolTip("WHOOP HR Overlay (right-click to quit)")
-    menu = QtWidgets.QMenu()
-    menu.addAction("Quit WHOOP HR Overlay", QtWidgets.QApplication.quit)
-    tray.setContextMenu(menu)
-    tray.show()
-
     class Bridge(QtCore.QObject):
         bpm = QtCore.Signal(int)
         status = QtCore.Signal(str)
@@ -215,23 +215,41 @@ def main() -> None:
     bridge.bpm.connect(win.set_bpm)
     bridge.status.connect(win.set_status)
 
+    # LAN diagnostics beacon: each scan + status change is broadcast as JSON on
+    # the local network (UDP 47999) so the developer can see what this PC sees.
+    beacon = LanBeacon(enabled=bool(cfg.get("lan_diagnostics", True)))
+    bridge.status.connect(beacon.status)
+
+    import hr_source as _hs
+
+    latest_whoops: list = []
+
+    def on_scan(rows) -> None:
+        latest_whoops[:] = [r["name"] for r in rows
+                            if r["name"] and _hs.looks_like_whoop(r["name"], r["uuids"], r["mfg"])]
+        beacon.scan(rows)
+
+    _hs.SCAN_LISTENERS.append(on_scan)
+
     serial = args.serial or cfg.get("serial")
     use_standard = args.standard or cfg.get("mode") == "standard" or (
         not serial and (args.name or args.address or cfg.get("address"))
     )
-    if args.simulate:
-        source = SimulatedHeartRateSource(bridge.bpm.emit, bridge.status.emit)
-    elif not use_standard:
-        # default: talk to the WHOOP directly over its own protocol
-        source = WhoopDirectSource(
-            bridge.bpm.emit,
-            bridge.status.emit,
-            serial=serial,
-            configure_band=bool(cfg.get("configure_band", True)),
-            log_path=default_log_path(),
-        )
-    else:
-        source = BleHeartRateSource(
+    holder = {"source": None}
+
+    def make_source(serial_):
+        if args.simulate:
+            return SimulatedHeartRateSource(bridge.bpm.emit, bridge.status.emit)
+        if not use_standard:
+            # default: talk to the WHOOP directly over its own protocol
+            return WhoopDirectSource(
+                bridge.bpm.emit,
+                bridge.status.emit,
+                serial=serial_,
+                configure_band=bool(cfg.get("configure_band", True)),
+                log_path=default_log_path(),
+            )
+        return BleHeartRateSource(
             bridge.bpm.emit,
             bridge.status.emit,
             address=(args.address or cfg.get("address")),
@@ -240,10 +258,107 @@ def main() -> None:
             log_path=default_log_path(),
         )
 
-    source.start()
-    app.aboutToQuit.connect(source.stop)
+    def switch_band(name: str) -> None:
+        serial_ = name.split()[-1]  # "WHOOP MGB0663331" -> "MGB0663331"
+        cfg["serial"] = serial_
+        save_config(cfg)
+        old = holder["source"]
+        if old is not None:
+            old.stop()
+        win.set_status(f"Switching to {name}...")
+        holder["source"] = make_source(serial_)
+        holder["source"].start()
+
+    # System-tray icon: quit + band picker (the overlay itself is click-through
+    # and has no taskbar entry).
+    tray = QtWidgets.QSystemTrayIcon(_make_tray_icon(), app)
+    tray.setToolTip("WHOOP HR Overlay (right-click for options)")
+    menu = QtWidgets.QMenu()
+    pick = menu.addMenu("Choose your WHOOP")
+
+    def fill_picker() -> None:
+        pick.clear()
+        names = sorted(set(latest_whoops))
+        if not names:
+            a = pick.addAction("No WHOOP broadcasting near this PC yet")
+            a.setEnabled(False)
+        for nm in names:
+            a = pick.addAction(nm)
+            a.setCheckable(True)
+            a.setChecked(bool(cfg.get("serial")) and cfg["serial"] in nm)
+            a.triggered.connect(lambda _=False, n=nm: switch_band(n))
+
+    pick.aboutToShow.connect(fill_picker)
+    menu.addSeparator()
+    menu.addAction("Quit WHOOP HR Overlay", QtWidgets.QApplication.quit)
+    tray.setContextMenu(menu)
+    tray.show()
+
+    holder["source"] = make_source(serial)
+    holder["source"].start()
+    app.aboutToQuit.connect(lambda: holder["source"] and holder["source"].stop())
     win.show()
     sys.exit(app.exec())
+
+
+VERSION = "0.2.1"
+
+
+class LanBeacon:
+    """Broadcast scan results + status as JSON over UDP on the local network."""
+
+    PORT = 47999
+
+    def __init__(self, enabled: bool = True) -> None:
+        import socket
+
+        self.sock = None
+        self.last_status = ""
+        if not enabled:
+            return
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.sock = s
+        except Exception:
+            self.sock = None
+
+    def _send(self, payload: dict) -> None:
+        if self.sock is None:
+            return
+        import json
+        import platform
+
+        payload.update(app="whoop-hr-overlay", version=VERSION, host=platform.node())
+        data = json.dumps(payload).encode()[:60000]
+        try:
+            self.sock.sendto(data, ("255.255.255.255", self.PORT))
+        except Exception:
+            pass
+
+    def status(self, text: str) -> None:
+        self.last_status = text
+        self._send({"kind": "status", "status": text[:800]})
+
+    def scan(self, rows) -> None:
+        # Broadcast datagrams can't be fragmented (macOS rejects >~1472 B), so
+        # split the report into small parts that share a scan id.
+        import json
+        import time
+
+        scan_id = int(time.time() * 1000) & 0xFFFFFFF
+        parts, cur = [], []
+        for r in rows:
+            cur.append({"n": r["name"], "r": r["rssi"], "a": r["addr"][-8:],
+                        "u": [u[:8] for u in r["uuids"]], "m": r["mfg"]})
+            if len(json.dumps(cur)) > 900:
+                parts.append(cur[:-1])
+                cur = cur[-1:]
+        parts.append(cur)
+        for i, devs in enumerate(parts):
+            self._send({"kind": "scan", "id": scan_id, "part": i, "parts": len(parts),
+                        "count": len(rows), "status": self.last_status[:200] if i == 0 else "",
+                        "devices": devs})
 
 
 if __name__ == "__main__":
