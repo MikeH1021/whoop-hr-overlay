@@ -159,6 +159,16 @@ def test_active_decoder_flags_railed_sensor():
     assert dec.railed and dec.extras()["PPG"] == "off wrist?"
 
 
+def test_pairing_refusal_is_recognised():
+    from active_source import pairing_refused
+
+    class ProtocolError(Exception):
+        pass
+
+    assert pairing_refused(ProtocolError("smp/PAIRING_NOT_SUPPORTED [0x5]"))
+    assert not pairing_refused(TimeoutError("connection timed out"))
+
+
 def test_command_response_resolves_pending_future():
     import asyncio
 

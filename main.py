@@ -503,7 +503,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 
 class LanBeacon:

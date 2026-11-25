@@ -43,6 +43,15 @@ LIVE_ON = ((81, "START_RAW_DATA"), (108, "optical live"), (106, "IMU live"))
 
 
 # ---------------------------------------------------------------- decoders --
+def pairing_refused(exc: BaseException) -> bool:
+    """True when the band itself said no to pairing (SMP 0x05 PAIRING_NOT_SUPPORTED,
+    or a Windows/bleak equivalent): it still holds a bond with another device, so
+    retrying is pointless until that bond is cleared."""
+    text = f"{exc!r} {exc}".upper().replace(" ", "_")
+    return any(k in text for k in ("PAIRING_NOT_SUPPORTED", "PAIRING_NOT_ALLOWED",
+                                   "REJECTEDBYHANDLER", "PAIRINGNOTSUPPORTED"))
+
+
 def ppg_from_frame(f: bytes) -> Optional[list]:
     """R20 optical frame (type 43, 2140 B) -> block-0 slot-A samples (int)."""
     if len(f) != 2140 or f[8] != 43:
@@ -431,6 +440,18 @@ class WhoopActiveSource(HeartRateSource):
                 except Exception:
                     pass
 
+    async def _hr_only(self, link, dec, label: str, exc: Exception) -> None:
+        """The band refused to pair (it still holds a bond with another phone or
+        computer). Keep the link up on standard HR instead of looping, and say
+        exactly what to do."""
+        self._log(f"[active] pairing refused by {label}: {exc!r}; staying on standard HR")
+        self._on_status(f"{label} won't pair\nIt's still paired to another phone or computer. "
+                        "Remove it there (or factory-reset the band), then reopen Settings. "
+                        "Showing basic heart rate meanwhile.")
+        while not self._stop.is_set() and not link.disconnected.is_set():
+            await asyncio.sleep(1.0)
+            self._on_extras({"Active": "band won't pair"})
+
     async def _session(self, link, target, tag: str) -> None:
         import whoop_framing as wf
 
@@ -468,7 +489,13 @@ class WhoopActiveSource(HeartRateSource):
             except Exception as exc:
                 self._log(f"[active] WHOOP channel locked ({type(exc).__name__}); securing link")
                 self._on_status(f"{tag} Pairing with {label}...")
-                await link.secure()
+                try:
+                    await link.secure()
+                except Exception as pexc:
+                    if not pairing_refused(pexc):
+                        raise
+                    await self._hr_only(link, dec, label, pexc)
+                    return
                 await link.subscribe(WHOOP_NOTIFY[0], on_whoop(WHOOP_NOTIFY[0]))
             for u in WHOOP_NOTIFY[1:]:
                 if link.has(u):
