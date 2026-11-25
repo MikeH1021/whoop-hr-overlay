@@ -337,11 +337,20 @@ class _DongleLink:
         from bumble.device import Peer
 
         self.disconnected = asyncio.Event()
-        self.conn = await self.device.connect(row["address"], timeout=15)
+        try:
+            if self.device.is_le_connecting:      # leftover from a cancelled source
+                await asyncio.wait_for(self.device.cancel_connection(), 3)
+        except Exception:
+            pass
+        self.log(f"[active] link: connecting to {row['addr']}")
+        self.conn = await asyncio.wait_for(
+            self.device.connect(row["address"], timeout=15), 20)
         self.conn.on("disconnection", lambda *_: self.disconnected.set())
+        self.log("[active] link: connected; discovering services")
         self.peer = Peer(self.conn)
-        await self.peer.discover_services()
-        await self.peer.discover_characteristics()
+        await asyncio.wait_for(self.peer.discover_services(), 15)
+        await asyncio.wait_for(self.peer.discover_characteristics(), 20)
+        self.log(f"[active] link: {len(self.peer.services)} services discovered")
 
     def _char(self, uuid: str):
         from bumble.core import UUID
@@ -447,7 +456,17 @@ class WhoopActiveSource(HeartRateSource):
                         continue
                     await self._session(link, target, tag)
             except Exception as exc:
-                from dongle_source import BUSY_STATUS, dongle_busy
+                from dongle_source import BUSY_STATUS, DongleHub, dongle_busy
+
+                if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or \
+                        "Timeout" in type(exc).__name__:
+                    fails = getattr(self, "_timeouts", 0) + 1
+                    self._timeouts = fails
+                    self._log(f"[active] timed out ({fails} in a row)")
+                    if self._use_dongle and fails >= 2:
+                        self._log("[active] resetting the dongle after repeated timeouts")
+                        self._timeouts = 0
+                        await DongleHub.get().reset()
 
                 if dongle_busy(exc):
                     self._on_status(BUSY_STATUS)
@@ -482,6 +501,7 @@ class WhoopActiveSource(HeartRateSource):
         label = target["name"] or self._serial
         self._on_status(f"{tag} Connecting to {label} ({target['rssi']} dBm)...")
         await link.connect(target)
+        self._timeouts = 0
         dec = ActiveDecoder(self._emit, self._on_pulse, self._log)
         pending = dec.pending
 

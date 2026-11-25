@@ -322,6 +322,11 @@ def main() -> None:
     # the local network (UDP 47999) so the developer can see what this PC sees.
     beacon = LanBeacon(enabled=bool(cfg.get("lan_diagnostics", True)))
     bridge.status.connect(beacon.status)
+    # Heartbeat: re-send the current status every 5 s so a stuck step is
+    # visible remotely (status messages are otherwise sent only on change).
+    beat = QtCore.QTimer(app)
+    beat.timeout.connect(lambda: beacon.status(beacon.last_status or "(no status yet)"))
+    beat.start(5000)
 
     import hr_source as _hs
 
@@ -553,7 +558,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 
 class LanBeacon:

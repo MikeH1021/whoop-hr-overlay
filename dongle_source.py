@@ -390,12 +390,17 @@ class WhoopDongleSource(HubSource, HeartRateSource):
 
         label = target["name"] or self._serial
         self._on_status(f"[dongle] Connecting to {label} ({target['rssi']} dBm)...")
-        conn = await device.connect(target["address"], timeout=15)
+        try:
+            if device.is_le_connecting:           # leftover from a cancelled source
+                await asyncio.wait_for(device.cancel_connection(), 3)
+        except Exception:
+            pass
+        conn = await asyncio.wait_for(device.connect(target["address"], timeout=15), 20)
         done = asyncio.Event()
         conn.on("disconnection", lambda *_: done.set())
         peer = Peer(conn)
-        await peer.discover_services()
-        await peer.discover_characteristics()
+        await asyncio.wait_for(peer.discover_services(), 15)
+        await asyncio.wait_for(peer.discover_characteristics(), 20)
 
         def char(uuid: str):
             found = peer.get_characteristics_by_uuid(UUID(uuid))
