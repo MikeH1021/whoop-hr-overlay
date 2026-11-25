@@ -282,6 +282,12 @@ class _BleakLink:
             await self.client.disconnect()
 
 
+def _hub_alive() -> bool:
+    from dongle_source import DongleHub
+
+    return DongleHub._inst is not None and DongleHub._inst.alive()
+
+
 class _DongleLink:
     """The USB dongle via Bumble. Bond keys persist in a JSON keystore."""
 
@@ -295,25 +301,14 @@ class _DongleLink:
         self.disconnected = asyncio.Event()
 
     async def open(self) -> None:
-        from bumble.device import Device
-        from bumble.keys import JsonKeyStore
-        from bumble.pairing import PairingConfig, PairingDelegate
-        from bumble.transport import open_transport
+        from dongle_source import DongleHub
 
-        from dongle_source import DONGLE_TRANSPORT, OWN_ADDRESS
-
-        self.transport = await open_transport(DONGLE_TRANSPORT)
-        src, sink = self.transport.source, self.transport.sink
-        self.device = Device.with_hci("WHOOP HR Overlay", OWN_ADDRESS, src, sink)
-        self.device.keystore = JsonKeyStore(namespace=OWN_ADDRESS, filename=self.keystore_path)
-        self.device.pairing_config_factory = lambda _c: PairingConfig(
-            sc=True, mitm=False, bonding=True,
-            delegate=PairingDelegate(io_capability=PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT))
-        await self.device.power_on()
+        # The shared hub keeps the dongle open across mode switches.
+        self.device = await DongleHub.get().device(self.keystore_path)
 
     async def close(self) -> None:
-        if self.transport is not None:
-            await self.transport.close()
+        """Drop our connection only; the dongle stays open for the next source."""
+        await self.disconnect()
 
     async def scan(self, seconds: float):
         from dongle_source import _AdvCache
@@ -322,10 +317,12 @@ class _DongleLink:
 
         cache = _AdvCache()
         self.device.on("advertisement", cache.add)
-        await self.device.start_scanning(active=True, filter_duplicates=False)
-        await asyncio.sleep(seconds)
-        await self.device.stop_scanning()
-        self.device.remove_listener("advertisement", cache.add)
+        try:
+            await self.device.start_scanning(active=True, filter_duplicates=False)
+            await asyncio.sleep(seconds)
+            await self.device.stop_scanning()
+        finally:
+            self.device.remove_listener("advertisement", cache.add)
         rows = sorted(cache.rows.values(), key=lambda r: r["rssi"], reverse=True)
         report = [{"addr": r["addr"], "name": r["name"], "rssi": r["rssi"],
                    "uuids": sorted(r["uuids"]), "mfg": sorted(r["mfg"])} for r in rows]
@@ -378,6 +375,7 @@ class _DongleLink:
 
 # ------------------------------------------------------------------ source --
 class WhoopActiveSource(HeartRateSource):
+    STOP_GRACE_S = 3.0   # long enough to restore the band's settings
     def __init__(
         self,
         on_bpm: Callable[[int], None],
@@ -397,10 +395,27 @@ class WhoopActiveSource(HeartRateSource):
         self._scan_seconds = scan_seconds
         self._seq = 0
 
+    # Over the dongle, run on the shared hub (no USB re-open on mode switch).
+    def start(self) -> None:
+        from dongle_source import HubSource
+
+        (HubSource.start if self._use_dongle else HeartRateSource.start)(self)
+
     def stop(self) -> None:
+        from dongle_source import HubSource
+
+        if self._use_dongle:
+            HubSource.stop(self)
+            return
         super().stop()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=6)
+
+    def wait(self, timeout: float = 5.0) -> None:
+        from dongle_source import HubSource
+
+        if self._use_dongle:
+            HubSource.wait(self, timeout)
 
     def _keystore_path(self) -> str:
         base = os.path.dirname(self._log_path) if self._log_path else os.getcwd()
@@ -412,7 +427,8 @@ class WhoopActiveSource(HeartRateSource):
             link = _DongleLink(self._log, self._keystore_path()) if self._use_dongle \
                 else _BleakLink(self._log)
             try:
-                self._on_status(f"{tag} Starting Bluetooth...")
+                if not self._use_dongle or not _hub_alive():
+                    self._on_status(f"{tag} Starting Bluetooth...")
                 await link.open()
                 while not self._stop.is_set():
                     rows = await link.scan(self._scan_seconds)

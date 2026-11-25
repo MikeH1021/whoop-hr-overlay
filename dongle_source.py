@@ -93,6 +93,182 @@ def launch_driver_installer() -> bool:
     return True
 
 
+class DongleHub:
+    """One USB dongle, opened once for the whole app.
+
+    Opening the dongle (USB claim + HCI reset + power on) takes seconds, so it
+    must not happen on every mode switch. The hub owns a single asyncio loop
+    thread and the Bumble Device; sources run on that loop one after another,
+    and switching only drops the band connection, never the dongle."""
+
+    _inst: Optional["DongleHub"] = None
+
+    @classmethod
+    def get(cls) -> "DongleHub":
+        if cls._inst is None:
+            cls._inst = cls()
+        return cls._inst
+
+    def __init__(self, transport: str = DONGLE_TRANSPORT) -> None:
+        import threading
+
+        self.transport_name = transport
+        self.transport = None
+        self.dev = None
+        self.keystore_path: Optional[str] = None
+        self._current: Optional[asyncio.Task] = None
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self._run, name="dongle-hub", daemon=True).start()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    # -- device ------------------------------------------------------------
+    def alive(self) -> bool:
+        if self.dev is None or self.transport is None:
+            return False
+        term = getattr(self.transport.source, "terminated", None)
+        return not (term is not None and term.done())
+
+    async def device(self, keystore_path: Optional[str] = None):
+        """The powered-on Bumble Device, opening (or re-opening after an
+        unplug) only when needed."""
+        if keystore_path and keystore_path != self.keystore_path:
+            self.keystore_path = keystore_path
+            if self.dev is not None:
+                self._set_keystore()
+        if self.alive():
+            return self.dev
+        await self.reset()
+        from bumble.device import Device
+        from bumble.pairing import PairingConfig, PairingDelegate
+        from bumble.transport import open_transport
+
+        self.transport = await open_transport(self.transport_name)
+        try:
+            dev = Device.with_hci("WHOOP HR Overlay", OWN_ADDRESS,
+                                  self.transport.source, self.transport.sink)
+            dev.pairing_config_factory = lambda _c: PairingConfig(
+                sc=True, mitm=False, bonding=True,
+                delegate=PairingDelegate(
+                    io_capability=PairingDelegate.IoCapability.NO_OUTPUT_NO_INPUT))
+            await dev.power_on()
+        except BaseException:
+            await self.reset()
+            raise
+        self.dev = dev
+        self._set_keystore()
+        return dev
+
+    def _set_keystore(self) -> None:
+        if self.dev is not None and self.keystore_path:
+            from bumble.keys import JsonKeyStore
+
+            self.dev.keystore = JsonKeyStore(namespace=OWN_ADDRESS,
+                                             filename=self.keystore_path)
+
+    async def reset(self) -> None:
+        self.dev = None
+        t, self.transport = self.transport, None
+        if t is not None:
+            try:
+                await asyncio.wait_for(t.close(), 3)
+            except BaseException:
+                pass
+
+    async def release(self) -> None:
+        """Drop whatever the previous source left: scanning and connections.
+        The dongle itself stays open."""
+        dev = self.dev
+        if dev is None or not self.alive():
+            return
+        try:
+            if getattr(dev, "is_scanning", False):
+                await asyncio.wait_for(dev.stop_scanning(), 2)
+        except BaseException:
+            pass
+        for conn in list(getattr(dev, "connections", {}).values()):
+            try:
+                await asyncio.wait_for(conn.disconnect(), 3)
+            except BaseException:
+                pass
+
+    # -- running sources -----------------------------------------------------
+    def run(self, coro_fn):
+        """Run a source's coroutine after the previous one has fully finished
+        (so its cleanup can't race the new source). Returns (future, task-box)."""
+        box: dict = {}
+
+        async def runner():
+            prev, self._current = self._current, asyncio.current_task()
+            box["task"] = self._current
+            if prev is not None and not prev.done():
+                await asyncio.wait([prev])
+            await self.release()
+            await coro_fn()
+
+        return asyncio.run_coroutine_threadsafe(runner(), self.loop), box
+
+    def shutdown(self, timeout: float = 4.0) -> None:
+        """App exit: let the running source finish its cleanup, then close USB."""
+        async def fin():
+            cur = self._current
+            if cur is not None and not cur.done():
+                await asyncio.wait([cur], timeout=timeout)
+            await self.release()
+            await self.reset()
+
+        try:
+            asyncio.run_coroutine_threadsafe(fin(), self.loop).result(timeout + 4)
+        except BaseException:
+            pass
+
+
+class HubSource:
+    """Mixin (put before HeartRateSource): run ``_main`` on the shared dongle
+    hub instead of a private thread + transport."""
+
+    STOP_GRACE_S = 3.0   # time to restore the band before we cancel
+
+    def start(self) -> None:
+        hub = DongleHub.get()
+        self._loop = hub.loop
+
+        async def body():
+            try:
+                await self._main()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self._on_status(f"error: {exc}")
+                self._log(f"FATAL {exc!r}")
+
+        self._hub_future, self._hub_box = hub.run(body)
+
+    def stop(self) -> None:
+        """Non-blocking: ask the loop to wind down; cancel it if it dawdles."""
+        self._stop.set()
+        loop, box = self._loop, getattr(self, "_hub_box", None)
+        if loop is None or box is None:
+            return
+
+        def cancel():
+            t = box.get("task")
+            if t is not None and not t.done():
+                t.cancel()
+
+        loop.call_soon_threadsafe(lambda: loop.call_later(self.STOP_GRACE_S, cancel))
+
+    def wait(self, timeout: float = 5.0) -> None:
+        f = getattr(self, "_hub_future", None)
+        if f is not None:
+            try:
+                f.result(timeout)
+            except BaseException:
+                pass
+
+
 class _AdvCache:
     """Merge advertising + scan-response data per address."""
 
@@ -132,7 +308,7 @@ def _full_uuid(u) -> str:
     return s
 
 
-class WhoopDongleSource(HeartRateSource):
+class WhoopDongleSource(HubSource, HeartRateSource):
     def __init__(
         self,
         on_bpm: Callable[[int], None],
@@ -152,43 +328,34 @@ class WhoopDongleSource(HeartRateSource):
 
     # ------------------------------------------------------------------
     async def _main(self) -> None:
-        from bumble.device import Device
-        from bumble.transport import open_transport
-
+        hub = DongleHub.get()
         while not self._stop.is_set():
             try:
-                self._on_status("Opening USB Bluetooth dongle...")
-                async with await open_transport(self._transport) as (src, sink):
-                    device = Device.with_hci("WHOOP HR Overlay", OWN_ADDRESS, src, sink)
-                    await device.power_on()
-                    self._log("dongle powered on")
-                    while not self._stop.is_set():
-                        target = await self._scan(device)
-                        if target is None:
-                            continue
-                        await self._stream(device, target)
+                if not hub.alive():
+                    self._on_status("Opening USB Bluetooth dongle...")
+                device = await hub.device()
+                while not self._stop.is_set():
+                    target = await self._scan(device)
+                    if target is None:
+                        continue
+                    await self._stream(device, target)
             except Exception as exc:
                 self._on_status(BUSY_STATUS if dongle_busy(exc)
                                 else f"Dongle error: {exc}\nRetrying...")
                 self._log(f"dongle error: {exc!r}")
                 await asyncio.sleep(3)
 
-    def stop(self) -> None:
-        # Let the loop close the USB transport cleanly before the process exits
-        # (libusb asserts if its context is torn down mid-transfer).
-        super().stop()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5)
-
     async def _scan(self, device):
         cache = _AdvCache()
         device.on("advertisement", cache.add)
-        await device.start_scanning(active=True, filter_duplicates=False)
-        end = time.monotonic() + self._scan_seconds
-        while time.monotonic() < end and not self._stop.is_set():
-            await asyncio.sleep(0.25)
-        await device.stop_scanning()
-        device.remove_listener("advertisement", cache.add)
+        try:
+            await device.start_scanning(active=True, filter_duplicates=False)
+            end = time.monotonic() + self._scan_seconds
+            while time.monotonic() < end and not self._stop.is_set():
+                await asyncio.sleep(0.25)
+            await device.stop_scanning()
+        finally:
+            device.remove_listener("advertisement", cache.add)
 
         rows = sorted(cache.rows.values(), key=lambda r: r["rssi"], reverse=True)
         report = [{"addr": r["addr"], "name": r["name"], "rssi": r["rssi"],

@@ -322,3 +322,45 @@ def test_stale_instance_pids_exclude_self_and_bootloader():
            '"explorer.exe","400","Console","1","50 K"\n')
     assert main.stale_pids(out, {200, 300}) == [100]
     assert main.stale_pids("INFO: No tasks are running", {1}) == []
+
+
+def test_band_list_refreshes_itself(qapp):
+    import overlay
+    import settings_dialog
+
+    heard = []
+    cfg = {"style": dict(overlay.DEFAULT_STYLE), "hr_mode": "active"}
+    d = settings_dialog.SettingsDialog(cfg, lambda: list(heard), lambda _w: None,
+                                       lambda: None, start_tab="source")
+    assert d.active_band.count() == 0
+    heard += ["WHOOP 5AM0207717", "W MGB0663331"]
+    d._refresh_bands()
+    assert d.active_band.count() == 2 and d.passive_band.count() == 2
+    assert "2 bands" in d.band_count.text()
+
+
+def test_hub_source_runs_sources_one_after_another():
+    import asyncio
+    import threading
+
+    from dongle_source import DongleHub
+
+    hub = DongleHub.__new__(DongleHub)          # no USB: just the loop + ordering
+    hub.dev = hub.transport = None
+    hub._current = None
+    hub.loop = asyncio.new_event_loop()
+    threading.Thread(target=hub.loop.run_forever, daemon=True).start()
+    order = []
+
+    def src(name, secs):
+        async def body():
+            order.append(f"{name}+")
+            await asyncio.sleep(secs)
+            order.append(f"{name}-")
+        return body
+
+    f1, _ = hub.run(src("a", 0.2))
+    f2, _ = hub.run(src("b", 0.0))
+    f2.result(3)
+    assert order == ["a+", "a-", "b+", "b-"]
+    hub.loop.call_soon_threadsafe(hub.loop.stop)

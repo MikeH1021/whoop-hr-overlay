@@ -186,11 +186,16 @@ class SettingsDialog(QtWidgets.QDialog):
         head.setProperty("title", True)
         sub = _hint("Changes apply instantly and are saved automatically.")
 
+        self._seen = set(self.whoops())
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.addTab(self._scroll(self._source_tab()), "Source")
         self.tabs.addTab(self._scroll(self._look_tab()), "Look")
         self.tabs.addTab(self._scroll(self._graphs_tab()), "Graphs")
         self.tabs.addTab(self._scroll(self._window_tab()), "Window")
+        # Band lists update live as the dongle hears bands (no Rescan needed).
+        self._live = QtCore.QTimer(self)
+        self._live.timeout.connect(self._refresh_bands)
+        self._live.start(1500)
         names = [self.tabs.tabText(i).lower() for i in range(self.tabs.count())]
         if start_tab.lower() in names:
             self.tabs.setCurrentIndex(names.index(start_tab.lower()))
@@ -278,6 +283,24 @@ class SettingsDialog(QtWidgets.QDialog):
         c.toggled.connect(lambda v: self._set_style(key, bool(v)))
         return c
 
+    def _refresh_bands(self) -> None:
+        now = set(self.whoops())
+        if now == self._seen:
+            return
+        self._seen = now
+        for cb in (self.passive_band, self.active_band):
+            # don't yank the list out from under the user mid-pick
+            if cb.view().isVisible() or cb.lineEdit().hasFocus():
+                self._seen = set()   # try again next tick
+                continue
+            cb.refill()
+        self.band_count.setText(self._band_count_text())
+
+    def _band_count_text(self) -> str:
+        n = len(set(self.whoops()))
+        return (f"{n} band{'s' if n != 1 else ''} heard nearby; the list updates by itself."
+                if n else "Listening for bands... the list fills in by itself.")
+
     def _band_combo(self, key: str, tip: str) -> QtWidgets.QComboBox:
         cb = QtWidgets.QComboBox()
         cb.setEditable(True)
@@ -332,10 +355,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.active_band = self._band_combo("active_serial", "A spare band for Active mode")
         f.addRow("Everyday band", self.passive_band)
         f.addRow("Dedicated band", self.active_band)
-        refresh = QtWidgets.QPushButton("Rescan list")
-        refresh.setToolTip("Refresh the list with bands heard since the overlay started")
-        refresh.clicked.connect(lambda: (self.passive_band.refill(), self.active_band.refill()))
-        f.addRow("", refresh)
+        self.band_count = _hint(self._band_count_text())
+        f.addRow("", self.band_count)
         f.addRow("", _hint("Only the band you pick is ever connected to. Other WHOOPs nearby "
                            "are listed but left alone."))
 

@@ -535,7 +535,17 @@ def main() -> None:
 
     holder["source"] = make_source()
     holder["source"].start()
-    app.aboutToQuit.connect(lambda: holder["source"] and holder["source"].stop())
+    def on_quit() -> None:
+        src = holder["source"]
+        if src is not None:
+            src.stop()
+            getattr(src, "wait", lambda _t: None)(5)
+        import dongle_source
+
+        if dongle_source.DongleHub._inst is not None:
+            dongle_source.DongleHub._inst.shutdown()
+
+    app.aboutToQuit.connect(on_quit)
     win.show()
     code = app.exec()
     # Hard exit: a Bluetooth/USB thread stuck in a driver call must never keep a
@@ -543,7 +553,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.6.4"
+VERSION = "0.7.0"
 
 
 class LanBeacon:
