@@ -12,3 +12,4 @@ dist/
 drivers/*.exe
 whoop-overlay-bonds.json
 whoop-overlay.log
+.pytest_cache/

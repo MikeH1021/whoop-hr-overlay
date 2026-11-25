@@ -79,6 +79,45 @@ THEMES = {
                      text_shadow=False, font_family="Consolas"),
 }
 
+def sanitize_style(style: dict | None) -> dict:
+    """Merge onto DEFAULT_STYLE, coercing each value to the default's type and
+    dropping anything unusable, so a hand-edited/corrupt config can't break
+    painting (which would otherwise raise on every frame)."""
+    out = dict(DEFAULT_STYLE)
+    for key, val in (style or {}).items():
+        if key not in DEFAULT_STYLE:
+            continue
+        ref = DEFAULT_STYLE[key]
+        try:
+            if isinstance(ref, bool):
+                val = val if isinstance(val, bool) else str(val).lower() in ("1", "true", "yes", "on")
+            elif isinstance(ref, int):
+                val = int(float(val))
+            elif isinstance(ref, float):
+                val = float(val)
+                if val != val or val in (float("inf"), float("-inf")):
+                    continue
+            elif key.endswith("_color"):
+                if not QtGui.QColor(str(val)).isValid():
+                    continue
+                val = str(val)
+            else:
+                val = str(val)
+        except (TypeError, ValueError):
+            continue
+        out[key] = val
+    out["bg_opacity"] = max(0.0, min(1.0, out["bg_opacity"]))
+    out["border_alpha"] = max(0.0, min(1.0, out["border_alpha"]))
+    out["font_scale"] = max(0.3, min(4.0, out["font_scale"]))
+    out["line_width"] = max(0.3, min(12.0, out["line_width"]))
+    out["corner_radius"] = max(0, min(60, out["corner_radius"]))
+    out["hr_window_s"] = max(5, min(3600, out["hr_window_s"]))
+    out["pulse_window_s"] = max(1, min(60, out["pulse_window_s"]))
+    if out["color_mode"] not in ("zones", "fixed"):
+        out["color_mode"] = "zones"
+    return out
+
+
 DEFAULT_SIZE = (300, 170)
 MIN_SIZE = (120, 54)
 SNAP_PX = 18
@@ -193,7 +232,7 @@ class OverlayWindow(QtWidgets.QWidget):
     def __init__(self, opts: dict, style: dict | None = None) -> None:
         super().__init__()
         self.opts = opts
-        self.style = dict(DEFAULT_STYLE, **(style or {}))
+        self.style = sanitize_style(style)
         self.max_hr = int(opts.get("max_hr", 190))
         self.locked = bool(opts.get("locked", False))
         self.snap = bool(opts.get("snap", True))
@@ -290,7 +329,7 @@ class OverlayWindow(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- style --
     def apply_style(self, style: dict) -> None:
-        self.style = dict(DEFAULT_STYLE, **style)
+        self.style = sanitize_style(style)
         self.update()
 
     def set_max_hr(self, v: int) -> None:
@@ -489,7 +528,13 @@ class OverlayWindow(QtWidgets.QWidget):
 
     def paintEvent(self, _event) -> None:
         t0 = time.perf_counter()
-        self._paint(_event)
+        try:
+            self._paint(_event)
+        except Exception as exc:  # never let a paint error take the overlay down
+            if not getattr(self, "_paint_err_logged", False):
+                self._paint_err_logged = True
+                import logging
+                logging.getLogger("whoop-hr-overlay").exception("paint failed: %r", exc)
         ms = (time.perf_counter() - t0) * 1000.0
         self._paint_ms += (ms - self._paint_ms) * 0.1
         # Adaptive frame rate: if a (very large) overlay can't hold 60 fps,

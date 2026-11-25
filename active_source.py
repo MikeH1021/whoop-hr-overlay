@@ -130,6 +130,101 @@ def motion_label(sd: float) -> str:
     return "still" if sd < 0.02 else "light" if sd < 0.12 else "active"
 
 
+class ActiveDecoder:
+    """Turns raw BLE notifications from a WHOOP into overlay data: reassembles
+    and CRC-checks frames, resolves command responses, and decodes live HR /
+    R-R (type 40), optical PPG and IMU motion (type 43). Transport-free, so it
+    can be fed synthetic frames in tests."""
+
+    def __init__(self, emit_bpm: Callable[[int], None], emit_pulse: Callable[[list, float], None],
+                 log: Callable[[str], None] = lambda _m: None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.emit_bpm = emit_bpm
+        self.emit_pulse = emit_pulse
+        self.log = log
+        self.clock = clock
+        self.pending: dict = {}            # (cmd, seq) -> future
+        self.reasm: dict = {}
+        self.ppg = PpgProcessor()
+        self.rr: collections.deque = collections.deque(maxlen=120)
+        self.t40 = -1e9                    # last type-40 frame
+        self.rr_from_band = -1e9           # last R-R from the band itself
+        self.motion: Optional[float] = None
+        self.railed = False
+        self.ppg_frames = 0
+        self.frames = 0
+        self.bad_frames = 0
+        self._first_hr = True
+
+    def _bpm(self, b: int, src: str) -> None:
+        if self._first_hr:
+            self.log(f"[active] first HR {b} via {src}")
+            self._first_hr = False
+        self.emit_bpm(b)
+
+    def on_std(self, data: bytes) -> None:
+        """Standard 0x2A37 notification; ignored while type-40 frames flow."""
+        bpm = parse_hr_measurement(data)
+        if bpm and self.clock() - self.t40 > 3:
+            self._bpm(bpm, "0x2A37")
+
+    def feed(self, uuid: str, value: bytes) -> None:
+        """One BLE notification fragment from a WHOOP notify characteristic."""
+        import whoop_framing as wf
+
+        r = self.reasm.setdefault(uuid, wf.Reassembler())
+        for frame in r.feed(bytes(value)):
+            if wf.verify_frame(frame):
+                self.frames += 1
+                self.on_frame(frame)
+            else:
+                self.bad_frames += 1
+
+    def on_frame(self, f: bytes) -> None:
+        import whoop_framing as wf
+
+        if f[8] == 36:
+            resp = wf.Response(f)
+            fut = self.pending.get((resp.cmd, resp.origin_seq))
+            if fut and not fut.done() and resp.result != 2:
+                fut.set_result(resp)
+            return
+        r = rr_from_frame(f)
+        if r:
+            bpm, rr = r
+            self.t40 = self.clock()
+            if 25 <= bpm <= 230:
+                self._bpm(bpm, "type 40")
+            if rr:
+                self.rr_from_band = self.clock()
+                self.rr.extend(rr)
+            return
+        raw = ppg_from_frame(f)
+        if raw is not None:
+            self.ppg_frames += 1
+            self.railed = sum(1 for x in raw if abs(x) >= RAIL) > len(raw) * 0.5
+            if not self.railed:
+                wave, beats = self.ppg.feed(raw)
+                self.emit_pulse(wave, self.ppg.rate)
+                if self.clock() - self.rr_from_band > 10:
+                    self.rr.extend(beats)          # PPG-derived fallback
+            return
+        m = motion_from_frame(f)
+        if m is not None:
+            self.motion = m
+
+    def extras(self) -> dict:
+        out = {}
+        hrv = rmssd(list(self.rr)[-60:])
+        if hrv is not None:
+            out["HRV"] = f"{hrv:.0f} ms"
+        if self.motion is not None:
+            out["motion"] = motion_label(self.motion)
+        if self.railed:
+            out["PPG"] = "off wrist?"
+        return out
+
+
 # -------------------------------------------------------------- transports --
 class _BleakLink:
     """The computer's own Bluetooth (Windows WinRT / macOS CoreBluetooth)."""
@@ -342,62 +437,11 @@ class WhoopActiveSource(HeartRateSource):
         label = target["name"] or self._serial
         self._on_status(f"{tag} Connecting to {label} ({target['rssi']} dBm)...")
         await link.connect(target)
-        pending: dict = {}
-        reasm: dict = {}
-        ppg = PpgProcessor()
-        rr_window: collections.deque = collections.deque(maxlen=120)
-        state = {"t40": 0.0, "motion": None, "railed": 0, "ppg_frames": 0,
-                 "rr_from_band": 0.0, "first_hr": True}
-
-        def emit_bpm(b: int, src: str) -> None:
-            if state["first_hr"]:
-                self._log(f"[active] first HR {b} via {src}")
-                state["first_hr"] = False
-            self._emit(b)
-
-        def on_std(data: bytes) -> None:
-            bpm = parse_hr_measurement(data)
-            if bpm and time.monotonic() - state["t40"] > 3:
-                emit_bpm(bpm, "0x2A37")
-
-        def on_frame(f: bytes) -> None:
-            if f[8] == 36:
-                resp = wf.Response(f)
-                fut = pending.get((resp.cmd, resp.origin_seq))
-                if fut and not fut.done() and resp.result != 2:
-                    fut.set_result(resp)
-                return
-            r = rr_from_frame(f)
-            if r:
-                bpm, rr = r
-                state["t40"] = time.monotonic()
-                if 25 <= bpm <= 230:
-                    emit_bpm(bpm, "type 40")
-                if rr:
-                    state["rr_from_band"] = time.monotonic()
-                    rr_window.extend(rr)
-                return
-            raw = ppg_from_frame(f)
-            if raw is not None:
-                state["ppg_frames"] += 1
-                state["railed"] = sum(1 for x in raw if abs(x) >= RAIL) > len(raw) * 0.5
-                if not state["railed"]:
-                    wave, beats = ppg.feed(raw)
-                    self._on_pulse(wave, ppg.rate)
-                    if time.monotonic() - state["rr_from_band"] > 10:
-                        rr_window.extend(beats)  # PPG-derived fallback
-                return
-            m = motion_from_frame(f)
-            if m is not None:
-                state["motion"] = m
+        dec = ActiveDecoder(self._emit, self._on_pulse, self._log)
+        pending = dec.pending
 
         def on_whoop(uuid: str):
-            def handler(value: bytes) -> None:
-                r = reasm.setdefault(uuid, wf.Reassembler())
-                for frame in r.feed(value):
-                    if wf.verify_frame(frame):
-                        on_frame(frame)
-            return handler
+            return lambda value: dec.feed(uuid, value)
 
         async def command(cid: int, body: bytes = b"", timeout: float = 5.0):
             self._seq = (self._seq + 1) & 0xFF
@@ -417,7 +461,7 @@ class WhoopActiveSource(HeartRateSource):
 
         try:
             if link.has(HR_MEASUREMENT_UUID):
-                await link.subscribe(HR_MEASUREMENT_UUID, on_std)
+                await link.subscribe(HR_MEASUREMENT_UUID, dec.on_std)
             # WHOOP channels need a bond: pair once (dedicated band only).
             try:
                 await link.subscribe(WHOOP_NOTIFY[0], on_whoop(WHOOP_NOTIFY[0]))
@@ -453,15 +497,7 @@ class WhoopActiveSource(HeartRateSource):
             last_kick = time.monotonic()
             while not self._stop.is_set() and not link.disconnected.is_set():
                 await asyncio.sleep(1.0)
-                extras = {}
-                hrv = rmssd(list(rr_window)[-60:])
-                if hrv is not None:
-                    extras["HRV"] = f"{hrv:.0f} ms"
-                if state["motion"] is not None:
-                    extras["motion"] = motion_label(state["motion"])
-                if state["railed"]:
-                    extras["PPG"] = "off wrist?"
-                self._on_extras(extras)
+                self._on_extras(dec.extras())
                 if time.monotonic() - last_kick > 60:
                     await command(3, b"\x01")
                     last_kick = time.monotonic()
@@ -477,4 +513,5 @@ class WhoopActiveSource(HeartRateSource):
                 except Exception:
                     pass
             self._on_status(f"{tag} Disconnected, retrying...")
-            self._log(f"[active] session ended ({state['ppg_frames']} PPG frames)")
+            self._log(f"[active] session ended ({dec.frames} frames, {dec.ppg_frames} PPG, "
+                      f"{dec.bad_frames} bad CRC)")

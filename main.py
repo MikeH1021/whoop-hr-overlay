@@ -66,18 +66,70 @@ def _make_tray_icon():
     return QtGui.QIcon(pm)
 
 
+def _read_json(path: str) -> dict:
+    """Read a JSON object; a corrupt file is moved aside (config.bad.json)
+    instead of crashing the app on launch."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        try:
+            os.replace(path, path[:-5] + ".bad.json" if path.endswith(".json") else path + ".bad")
+        except OSError:
+            pass
+        return {}
+
+
+def migrate_config(cfg: dict) -> dict:
+    """Bring older config files up to date."""
+    cfg = dict(cfg)
+    # v0.1-0.2 used "name": "WHOOP <serial>" for the band
+    name = cfg.get("name")
+    if not cfg.get("serial") and isinstance(name, str) and len(name.split()) == 2 \
+            and name.split()[0].upper() in ("WHOOP", "W"):
+        cfg["serial"] = name.split()[1]
+    if cfg.get("hr_mode") not in (None, "passive", "active"):
+        cfg["hr_mode"] = "passive"
+    if cfg.get("adapter") not in (None, "auto", "dongle", "system"):
+        cfg["adapter"] = "auto"
+    geo = cfg.get("geometry")
+    if geo is not None and not (isinstance(geo, list) and len(geo) == 4
+                                and all(isinstance(v, (int, float)) for v in geo)):
+        cfg.pop("geometry")
+    if not isinstance(cfg.get("style", {}), dict):
+        cfg["style"] = {}
+    try:
+        cfg["max_hr"] = max(100, min(240, int(cfg.get("max_hr", 190))))
+    except (TypeError, ValueError):
+        cfg["max_hr"] = 190
+    return cfg
+
+
 def load_config(path: str | None) -> dict:
     """Load config.json: an explicit --config, else one next to the exe/script."""
-    if path:
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+    target = path or os.path.join(HERE, "config.json")
+    if not os.path.exists(target):
         return {}
-    default = os.path.join(HERE, "config.json")
-    if os.path.exists(default):
-        with open(default, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    return {}
+    return migrate_config(_read_json(target))
+
+
+def install_error_logging() -> None:
+    """Log unexpected exceptions to whoop-overlay.log instead of dying silently
+    (a --windowed exe has no console to show them)."""
+    import logging
+
+    try:
+        logging.basicConfig(filename=os.path.join(HERE, "whoop-overlay.log"), level=logging.INFO,
+                            format="%(asctime)s  %(levelname)s %(message)s")
+    except OSError:
+        pass
+    log = logging.getLogger("whoop-hr-overlay")
+
+    def hook(exc_type, exc, tb):
+        log.error("unhandled exception", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = hook
 
 
 def save_config(cfg: dict) -> None:
@@ -165,6 +217,7 @@ def main() -> None:
             pass
         return
 
+    install_error_logging()
     cfg = load_config(args.config)
     if args.serial:
         cfg["serial"] = args.serial
@@ -450,7 +503,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 class LanBeacon:
