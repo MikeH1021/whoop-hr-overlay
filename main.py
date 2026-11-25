@@ -500,10 +500,13 @@ def main() -> None:
     holder["source"].start()
     app.aboutToQuit.connect(lambda: holder["source"] and holder["source"].stop())
     win.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    # Hard exit: a Bluetooth/USB thread stuck in a driver call must never keep a
+    # windowless process alive holding the dongle (LIBUSB_ERROR_ACCESS next run).
+    os._exit(code)
 
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 
 class LanBeacon:

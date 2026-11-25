@@ -56,6 +56,17 @@ def dongle_state() -> str:
     return "absent"
 
 
+BUSY_STATUS = ("USB dongle is busy\nAnother program (often an old overlay still running) "
+               "has it. Unplug the dongle and plug it back in, or end extra "
+               "whoop-hr-overlay.exe in Task Manager.")
+
+
+def dongle_busy(exc: BaseException) -> bool:
+    """libusb ACCESS/BUSY: the dongle is open in another process."""
+    t = repr(exc).upper()
+    return "ERROR_ACCESS" in t or "ERRORACCESS" in t or "ERROR_BUSY" in t or "ERRORBUSY" in t
+
+
 def dongle_present() -> bool:
     return dongle_state() == "ready"
 
@@ -156,7 +167,8 @@ class WhoopDongleSource(HeartRateSource):
                             continue
                         await self._stream(device, target)
             except Exception as exc:
-                self._on_status(f"Dongle error: {exc}\nRetrying...")
+                self._on_status(BUSY_STATUS if dongle_busy(exc)
+                                else f"Dongle error: {exc}\nRetrying...")
                 self._log(f"dongle error: {exc!r}")
                 await asyncio.sleep(3)
 

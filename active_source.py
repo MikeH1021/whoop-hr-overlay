@@ -431,7 +431,12 @@ class WhoopActiveSource(HeartRateSource):
                         continue
                     await self._session(link, target, tag)
             except Exception as exc:
-                self._on_status(f"{tag} {type(exc).__name__}: {exc}\nRetrying...")
+                from dongle_source import BUSY_STATUS, dongle_busy
+
+                if dongle_busy(exc):
+                    self._on_status(BUSY_STATUS)
+                else:
+                    self._on_status(f"{tag} {type(exc).__name__}: {exc}\nRetrying...")
                 self._log(f"[active] error: {exc!r}")
                 await asyncio.sleep(3)
             finally:

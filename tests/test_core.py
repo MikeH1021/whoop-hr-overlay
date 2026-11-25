@@ -300,3 +300,14 @@ def test_stream_effects(qapp):
     off.set_bpm(60)
     off.set_bpm(90)
     assert off._spike is None
+
+
+def test_dongle_busy_detection():
+    from dongle_source import dongle_busy
+
+    class USBErrorAccess(Exception):
+        def __repr__(self):
+            return "USBErrorAccess(LIBUSB_ERROR_ACCESS [-3])"
+
+    assert dongle_busy(USBErrorAccess())
+    assert not dongle_busy(RuntimeError("timeout"))
