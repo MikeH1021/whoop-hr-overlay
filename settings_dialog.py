@@ -449,6 +449,17 @@ class SettingsDialog(QtWidgets.QDialog):
                 ("Graph captions", "show_captions", "Small label above the pulse graph"),
                 ("Grid lines", "show_grid", "Faint guide lines behind the heart-rate graph")):
             f.addRow(self._check(text, key, tip))
+        f.addRow(_section("Stream effects"))
+        for text, key, tip in (
+                ("Beat shockwaves", "fx_beat_rings", "A ring ripples out of the heart on every beat"),
+                ("Spike alerts", "fx_spikes", "Shake, flash and a '+18 BPM SPIKE' callout when your "
+                                              "heart rate jumps fast"),
+                ("Mood tags", "fx_mood", "ICE COLD / LOCKED IN / HEART RACING / CLUTCH!"),
+                ("Session peak marker", "show_peak", "Marks your highest heart rate on the graph")):
+            f.addRow(self._check(text, key, tip))
+        f.addRow("Spike trigger", self._slider(
+            6, 30, self.style["spike_bpm"], lambda v: self._set_style("spike_bpm", int(v)), " bpm",
+            tip="How big a jump within 8 seconds counts as a spike"))
         f.addRow(_section("Time spans"))
         f.addRow("Heart-rate graph", self._slider(
             10, 300, self.style["hr_window_s"], lambda v: self._set_style("hr_window_s", int(v)), "s"))

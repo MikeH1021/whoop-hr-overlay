@@ -43,6 +43,14 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
   - **Active** (a dedicated band paired to this PC): the band's real **optical PPG waveform**
     (~25 samples/s), **beat-to-beat R-R intervals with live HRV**, and **motion**. Uses a spare
     band, because a band can only be connected to one app at a time.
+- **Stream effects:** made for friends watching your screen share:
+  - **Beat shockwaves:** a ring ripples out of the heart on every beat.
+  - **Spike alerts:** when your heart rate jumps fast (default +12 bpm within 8 s), the
+    panel shakes, the border flashes red and a **"▲ +18 BPM SPIKE"** callout pops in.
+  - **Mood tags:** **ICE COLD** (low and rock steady), **LOCKED IN**, **HEART RACING**,
+    **CLUTCH!**
+  - **Session peak:** your highest point is marked on the graph when it stands out.
+  Each effect can be switched off, and the spike trigger is adjustable (Graphs tab).
 - **Themes:** Midnight, Glass, Neon, Esports, Minimal, Daylight and Terminal, picked from live
   preview cards. Tweak any of them (font, text size, colors, glow, gradient, border, opacity,
   corner radius, line width) and it becomes your own Custom theme.

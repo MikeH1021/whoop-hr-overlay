@@ -264,3 +264,29 @@ def test_settings_dialog_builds_and_applies_themes(qapp):
     d._set_style("accent_color", "#123456")
     assert cfg["style"]["theme"] == "Custom" and "style" in changes
     json.dumps(cfg)  # whole config stays serialisable
+
+
+def test_stream_effects(qapp):
+    from PySide6 import QtGui
+
+    import overlay
+
+    w = overlay.OverlayWindow({"max_hr": 190, "geometry": [0, 0, 300, 170]}, {})
+    now = time.monotonic()
+    for i in range(30):
+        w.hr.append((now - 30 + i, 62 + (i % 2)))
+    w.set_bpm(62)
+    assert w._mood() == "ICE COLD" and w._spike is None
+    w.set_bpm(80)                                   # +18 within 8 s
+    assert w._spike and w._spike[1] == 18 and w._mood() == "CLUTCH!"
+    w.set_bpm(95)                                   # cooldown: no second spike
+    assert w._spike[1] == 18
+    img = QtGui.QImage(w.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+    for _ in range(5):
+        w._tick()
+        w._paint(None)
+        w.render(img)
+    off = overlay.OverlayWindow({"max_hr": 190}, {"fx_spikes": False})
+    off.set_bpm(60)
+    off.set_bpm(90)
+    assert off._spike is None

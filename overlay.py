@@ -45,7 +45,17 @@ DEFAULT_STYLE = {
     "show_zone": True,
     "hr_window_s": 30,
     "pulse_window_s": 6,
+    # stream effects
+    "fx_beat_rings": True,     # ring ripples out of the heart on every beat
+    "fx_spikes": True,         # shake + flash + callout on a fast heart-rate jump
+    "fx_mood": True,           # ICE COLD / LOCKED IN / HEART RACING / CLUTCH!
+    "show_peak": True,         # session-peak marker on the graph
+    "spike_bpm": 12,           # jump within 8 s that counts as a spike
 }
+
+MOODS = {"CLUTCH!": "#ff3b5c", "HEART RACING": "#ff9f45", "LOCKED IN": "#3ddc97",
+         "ICE COLD": "#7cd8ff"}
+SPIKE_COLOR = "#ff3b5c"
 
 # Built-in looks. Applying one overwrites only these appearance keys.
 THEMES = {
@@ -113,6 +123,7 @@ def sanitize_style(style: dict | None) -> dict:
     out["corner_radius"] = max(0, min(60, out["corner_radius"]))
     out["hr_window_s"] = max(5, min(3600, out["hr_window_s"]))
     out["pulse_window_s"] = max(1, min(60, out["pulse_window_s"]))
+    out["spike_bpm"] = max(4, min(40, out["spike_bpm"]))
     if out["color_mode"] not in ("zones", "fixed"):
         out["color_mode"] = "zones"
     return out
@@ -258,6 +269,10 @@ class OverlayWindow(QtWidgets.QWidget):
         self._hover = False
         self._drag = None
         self._resize = None
+        self._rings: list = []                 # beat shockwave start times
+        self._spike = None                     # (time, +bpm) of the last spike
+        self._last_spike = -1e9
+        self._peak = None                      # (time, bpm) session peak
 
         flags = (QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint
                  | QtCore.Qt.Tool | QtCore.Qt.WindowDoesNotAcceptFocus)
@@ -341,6 +356,14 @@ class OverlayWindow(QtWidgets.QWidget):
         now = time.monotonic()
         self.current = int(bpm)
         self.hr.append((now, int(bpm)))
+        if self._peak is None or bpm >= self._peak[1]:
+            self._peak = (now, int(bpm))
+        recent = [v for t, v in self.hr if t >= now - 8]
+        jump = int(bpm) - min(recent) if recent else 0
+        if (self.style["fx_spikes"] and jump >= int(self.style["spike_bpm"])
+                and now - self._last_spike > 12):
+            self._spike = (now, jump)
+            self._last_spike = now
         cutoff = now - max(10, int(self.style["hr_window_s"])) - 3
         while self.hr and self.hr[0][0] < cutoff:
             self.hr.popleft()
@@ -384,7 +407,11 @@ class OverlayWindow(QtWidgets.QWidget):
         self._last = now
         bpm = self.current
         if bpm:
+            before = int(self._phase)
             self._phase += dt * bpm / 60.0
+            if int(self._phase) != before and self.style["fx_beat_rings"]:
+                self._rings.append(now)
+            self._rings = [t for t in self._rings if now - t < 0.9]
             self._beat_env = max(0.0, 1.0 - (self._phase % 1.0) / 0.35) ** 1.6
             self._shown.step(float(bpm), dt)
         else:
@@ -557,6 +584,13 @@ class OverlayWindow(QtWidgets.QWidget):
         muted = QtGui.QColor(st["muted_color"])
 
         self._paint_background(p, w, h, k)
+        spike_a = self._spike_amount()
+        if spike_a > 0:
+            self._paint_spike_border(p, w, h, k, spike_a)
+            age = time.monotonic() - self._spike[0]
+            if age < 0.6:                       # quick decaying shake
+                amp = 3.0 * k * (1 - age / 0.6)
+                p.translate(math.sin(age * 70) * amp, math.cos(age * 55) * amp * 0.5)
         live = self._live_a.v or 0.0
         if live < 0.999:
             p.setOpacity(1.0 - live)
@@ -565,6 +599,8 @@ class OverlayWindow(QtWidgets.QWidget):
             p.setOpacity(live)
             self._paint_live(p, w, h, k, text, muted, col)
         p.setOpacity(1.0)
+        if self.style["fx_spikes"] and self.current and spike_a > 0:
+            self._paint_spike_callout(p, w, k, spike_a)
         ha = self._hover_a.v or 0.0
         if ha > 0.01:
             self._paint_controls(p, k, text, ha)
@@ -672,6 +708,15 @@ class OverlayWindow(QtWidgets.QWidget):
                 p.setPen(QtCore.Qt.NoPen)
                 p.setBrush(halo)
                 p.drawEllipse(QtCore.QPointF(cx, cy), hs * 2.4, hs * 2.4)
+            now_r = time.monotonic()
+            for t_r in self._rings:              # beat shockwaves
+                age = (now_r - t_r) / 0.9
+                rc = QtGui.QColor(col)
+                rc.setAlphaF(max(0.0, 0.55 * (1 - age)))
+                p.setPen(QtGui.QPen(rc, max(1.0, 2.2 * k * (1 - age) + 0.4)))
+                p.setBrush(QtCore.Qt.NoBrush)
+                rad = hs * (1.1 + 2.6 * age)
+                p.drawEllipse(QtCore.QPointF(cx, cy), rad, rad)
             self._draw_heart(p, cx, cy, hs, col)
             x += size_ref * 0.37
         shown = int(round(self._shown.v or self.current or 0))
@@ -681,8 +726,11 @@ class OverlayWindow(QtWidgets.QWidget):
         num_w = fm.horizontalAdvance("8" * len(num))   # stable width while counting
         nr = QtCore.QRectF(x, r.top(), num_w + 4, r.height() * 0.8)
         self._text(p, nr, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, num, text)
-        cap = "BPM"
-        if st["show_zone"] and st["color_mode"] == "zones" and self.current:
+        cap, cap_col = "BPM", muted
+        mood = self._mood() if st["fx_mood"] else None
+        if mood:
+            cap, cap_col = f"BPM  ·  {mood}", QtGui.QColor(MOODS[mood])
+        elif st["show_zone"] and st["color_mode"] == "zones" and self.current:
             z, _c, name = zone_of(self.current, self.max_hr)
             if z:
                 cap = f"BPM  ·  Z{z} {name}"
@@ -690,7 +738,7 @@ class OverlayWindow(QtWidgets.QWidget):
         cap_w = p.fontMetrics().horizontalAdvance(cap)
         self._text(p, QtCore.QRectF(x + 2, r.top() + r.height() * 0.74, cap_w + 4,
                                     r.height() * 0.22),
-                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap, muted)
+                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap, cap_col)
         return x + max(num_w, min(cap_w, num_w * 1.6))
 
     def _draw_stats(self, p, rect, k, muted) -> None:
@@ -843,6 +891,90 @@ class OverlayWindow(QtWidgets.QWidget):
         p.drawEllipse(end, rr, rr)
         p.setBrush(col)
         p.drawEllipse(end, 2.8 * k, 2.8 * k)
+        avg = sum(v for _t, v in data) / len(data)
+        if (self.style["show_peak"] and self._peak and self._peak[0] >= t0
+                and self._peak[0] < now - 3 and self._peak[1] >= avg + 5):
+            tp, vp = self._peak   # only when it stands out and isn't the live point
+            px = rect.left() + (tp - t0) / win * rect.width()
+            py = rect.bottom() - max(0.0, min(1.0, (vp - lo) / span)) * rect.height()
+            tc = QtGui.QColor(self.style["text_color"])
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(tc)
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(px, py - 3 * k),
+                                           QtCore.QPointF(px - 3.5 * k, py - 9 * k),
+                                           QtCore.QPointF(px + 3.5 * k, py - 9 * k)]))
+            p.setFont(self._font(max(7.5, 8 * k), QtGui.QFont.Bold))
+            label = f"PEAK {vp}"
+            lw_ = p.fontMetrics().horizontalAdvance(label)
+            lx = min(max(rect.left(), px - lw_ / 2), rect.right() - lw_)
+            ly = py - 22 * k if py - 22 * k > 0 else py + 4 * k
+            self._text(p, QtCore.QRectF(lx, ly, lw_ + 2, 12 * k), QtCore.Qt.AlignCenter, label, tc)
+
+    # ------------------------------------------------------- stream effects --
+    def _spike_amount(self) -> float:
+        """1.0 while a spike reaction is showing, fading out at the end."""
+        if not self._spike:
+            return 0.0
+        age = time.monotonic() - self._spike[0]
+        if age > 3.0:
+            return 0.0
+        return 1.0 if age < 2.2 else 1.0 - (age - 2.2) / 0.8
+
+    def _mood(self):
+        if not self.current:
+            return None
+        if self._spike_amount() > 0:
+            return "CLUTCH!"
+        z = zone_of(self.current, self.max_hr)[0] or 1
+        if z >= 4:
+            return "HEART RACING"
+        now = time.monotonic()
+        vals = [v for t, v in self.hr if t >= now - 30]
+        if len(vals) >= 15:
+            m = sum(vals) / len(vals)
+            sd = (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
+            if z <= 2 and sd < 1.6:
+                return "ICE COLD"
+            if sd < 3.0:
+                return "LOCKED IN"
+        return None
+
+    def _paint_spike_border(self, p, w, h, k, a) -> None:
+        c = QtGui.QColor(SPIKE_COLOR)
+        c.setAlphaF(min(1.0, 0.95 * a * (0.55 + 0.45 * math.sin(time.monotonic() * 14))))
+        r = float(self.style["corner_radius"]) * min(1.0, k)
+        p.save()
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.setPen(QtGui.QPen(c, 2.6 * k))
+        p.drawRoundedRect(QtCore.QRectF(1.5, 1.5, w - 3, h - 3), r, r)
+        p.restore()
+
+    def _paint_spike_callout(self, p, w, k, a) -> None:
+        age = time.monotonic() - self._spike[0]
+        t = min(1.0, age / 0.3)                  # pop in with a little overshoot
+        scale = 1.0 + 0.35 * math.sin(t * math.pi) * (1 - t * 0.5) if t < 1 else 1.0
+        text = f"▲ +{self._spike[1]} BPM SPIKE"
+        f = self._font(max(8.0, 10.5 * k), QtGui.QFont.Black)
+        fm = QtGui.QFontMetrics(f)
+        tw, th = fm.horizontalAdvance(text) + 16 * k, fm.height() + 6 * k
+        cx = w - tw / 2 - 10 * k - 26 * k * (self._hover_a.v or 0.0)
+        cy = 10 * k + th / 2
+        p.save()
+        p.setOpacity(a)
+        p.translate(cx, cy)
+        p.scale(scale, scale)
+        rect = QtCore.QRectF(-tw / 2, -th / 2, tw, th)
+        glow = QtGui.QColor(SPIKE_COLOR)
+        glow.setAlphaF(0.35)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(glow)
+        p.drawRoundedRect(rect.adjusted(-3 * k, -3 * k, 3 * k, 3 * k), th / 2 + 3 * k, th / 2 + 3 * k)
+        p.setBrush(QtGui.QColor(SPIKE_COLOR))
+        p.drawRoundedRect(rect, th / 2, th / 2)
+        p.setFont(f)
+        p.setPen(QtGui.QColor("white"))
+        p.drawText(rect, QtCore.Qt.AlignCenter, text)
+        p.restore()
 
     def _paint_pulse(self, p, rect, k, muted, col) -> None:
         real = self.pulse_is_real
