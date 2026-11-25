@@ -32,8 +32,9 @@ OWN_ADDRESS = "C0:FF:EE:48:52:01"   # random static address for the dongle
 
 
 def dongle_state() -> str:
-    """'ready' (plugged in and usable), 'needs_driver' (plugged in, but Windows
-    hasn't got WinUSB on it so libusb can't open it), or 'absent'."""
+    """'ready' (plugged in and usable), 'busy' (plugged in, but another process
+    has it open), 'needs_driver' (plugged in, but Windows hasn't got WinUSB on
+    it so libusb can't open it), or 'absent'."""
     try:
         import usb1  # from the libusb1 package (a Bumble dependency)
 
@@ -49,8 +50,8 @@ def dongle_state() -> str:
                     try:
                         dev.open().close()
                         return "ready"
-                    except Exception:
-                        return "needs_driver"
+                    except Exception as exc:
+                        return "busy" if dongle_busy(exc) else "needs_driver"
     except Exception:
         return "absent"
     return "absent"

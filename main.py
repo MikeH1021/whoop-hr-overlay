@@ -319,8 +319,11 @@ def main() -> None:
         from dongle_source import dongle_state
 
         adapter["dongle"] = dongle_state()
-        if want == "dongle" or adapter["dongle"] == "ready":
+        # 'busy' still means our dongle is plugged in: use it; the source says
+        # it's busy and grabs it the moment the other holder lets go.
+        if want == "dongle" or adapter["dongle"] in ("ready", "busy"):
             adapter["kind"] = "dongle"
+        beacon.log(f"[adapter] want={want} dongle={adapter['dongle']} -> {adapter['kind']}")
 
     choose_adapter()
 
@@ -461,13 +464,15 @@ def main() -> None:
         from dongle_source import dongle_state
 
         state = dongle_state()
+        if state != adapter["dongle"]:
+            beacon.log(f"[adapter] dongle {adapter['dongle']} -> {state}")
         if state != adapter["dongle"] and state == "needs_driver":
             tray.showMessage("USB dongle needs its driver",
                              "Right-click the heart in the tray > Install USB dongle driver",
                              QtWidgets.QSystemTrayIcon.Information, 10000)
         adapter["dongle"] = state
         driver_action.setVisible(state == "needs_driver")
-        if state == "ready":
+        if state in ("ready", "busy"):
             adapter["kind"] = "dongle"
             label_radio()
             tray.showMessage("USB dongle ready", "Switched to the USB Bluetooth dongle.",
@@ -506,7 +511,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 
 class LanBeacon:

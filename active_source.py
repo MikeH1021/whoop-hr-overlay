@@ -435,6 +435,9 @@ class WhoopActiveSource(HeartRateSource):
 
                 if dongle_busy(exc):
                     self._on_status(BUSY_STATUS)
+                elif "BluetoothNotAvailable" in type(exc).__name__ or "No Bluetooth" in str(exc):
+                    self._on_status("No Bluetooth found\nPlug in the USB dongle: the overlay "
+                                    "switches to it automatically within a few seconds.")
                 else:
                     self._on_status(f"{tag} {type(exc).__name__}: {exc}\nRetrying...")
                 self._log(f"[active] error: {exc!r}")
