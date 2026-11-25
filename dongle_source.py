@@ -36,10 +36,10 @@ def dongle_present() -> bool:
     try:
         import usb1  # from the libusb1 package (a Bumble dependency)
 
-        try:  # same as Bumble: load the libusb DLL bundled by libusb_package
-            import libusb_package
+        try:  # exactly Bumble's loader (bundled libusb DLL); usb1 guards re-loads
+            from bumble.transport.usb import load_libusb
 
-            usb1.loadLibrary(libusb_package.get_library_path())
+            load_libusb()
         except Exception:
             pass
         with usb1.USBContext() as ctx:
@@ -69,7 +69,8 @@ class _AdvCache:
         d = adv.data
         nm = d.get(AD.COMPLETE_LOCAL_NAME) or d.get(AD.SHORTENED_LOCAL_NAME)
         if nm:
-            row["name"] = nm if isinstance(nm, str) else bytes(nm).decode(errors="replace")
+            nm = nm if isinstance(nm, str) else bytes(nm).decode(errors="replace")
+            row["name"] = nm.replace("\x00", "").strip()  # WHOOP pads its name with NULs
         for t in (AD.COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
                   AD.INCOMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS,
                   AD.COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS,
@@ -129,11 +130,20 @@ class WhoopDongleSource(HeartRateSource):
                 self._log(f"dongle error: {exc!r}")
                 await asyncio.sleep(3)
 
+    def stop(self) -> None:
+        # Let the loop close the USB transport cleanly before the process exits
+        # (libusb asserts if its context is torn down mid-transfer).
+        super().stop()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
     async def _scan(self, device):
         cache = _AdvCache()
         device.on("advertisement", cache.add)
         await device.start_scanning(active=True, filter_duplicates=False)
-        await asyncio.sleep(self._scan_seconds)
+        end = time.monotonic() + self._scan_seconds
+        while time.monotonic() < end and not self._stop.is_set():
+            await asyncio.sleep(0.25)
         await device.stop_scanning()
         device.remove_listener("advertisement", cache.add)
 
@@ -209,25 +219,35 @@ class WhoopDongleSource(HeartRateSource):
                         emit(bpm, f"WHOOP type {frame[8]}")
             return handler
 
-        try:
-            hr = char(HR_MEASUREMENT_UUID)
-            if hr is not None:
-                await peer.subscribe(
-                    hr, lambda v: (lambda b: b and emit(b, "0x2A37"))(parse_hr_measurement(bytes(v))))
-            for u in WHOOP_NOTIFY:
-                c = char(u)
-                if c is not None:
-                    await peer.subscribe(c, on_whoop(u))
+        # Standard HR (0x2A37) works without pairing -- that's the main path.
+        hr = char(HR_MEASUREMENT_UUID)
+        if hr is not None:
+            await peer.subscribe(
+                hr, lambda v: (lambda b: b and emit(b, "0x2A37"))(parse_hr_measurement(bytes(v))))
+            self._log("[dongle] subscribed to standard HR 0x2A37")
+        # WHOOP's own channels need a bond with the band. Never pair on our own
+        # (it could push the user's phone off the band); just skip them.
+        cmd = None
+        whoop_ok = False
+        for u in WHOOP_NOTIFY:
+            c = char(u)
+            if c is None:
+                continue
+            try:
+                await peer.subscribe(c, on_whoop(u))
+                whoop_ok = True
+            except Exception as exc:
+                self._log(f"[dongle] WHOOP channel {u[:8]} unavailable ({type(exc).__name__}); "
+                          "using standard HR only")
+                break
+        if whoop_ok:
             cmd = char(WHOOP_CMD)
-        except Exception as exc:
-            if "INSUFFICIENT_AUTHENTICATION" in str(exc) or "INSUFFICIENT_ENCRYPTION" in str(exc):
-                self._on_status("[dongle] The band requires pairing for this.\n"
-                                "Not pairing automatically (could unpair your phone).")
-                self._log(f"[dongle] pairing required: {exc!r}")
-                await conn.disconnect()
-                await asyncio.sleep(30)
-                return
-            raise
+        if hr is None and not whoop_ok:
+            self._on_status(f"[dongle] {label} exposes no heart-rate channel\n"
+                            "without pairing. Turn on HR broadcast for the band.")
+            await conn.disconnect()
+            await asyncio.sleep(10)
+            return
 
         async def command(cmd_id: int, body: bytes = b"", timeout: float = 5.0):
             self._seq = (self._seq + 1) & 0xFF

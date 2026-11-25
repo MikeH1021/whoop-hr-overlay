@@ -339,7 +339,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 
 
 class LanBeacon:

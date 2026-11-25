@@ -1,0 +1,6 @@
+2026-11-24 19:07:42  dongle powered on
+2026-11-24 19:07:49  [dongle] found W MGB0663331 at -45 dBm
+2026-11-24 19:07:50  [dongle] subscribed to standard HR 0x2A37
+2026-11-24 19:07:50  [dongle] WHOOP channel fd4b0003 unavailable (ATT_Error); using standard HR only
+2026-11-24 19:07:50  [dongle] first HR 81 bpm via 0x2A37
+2026-11-24 19:08:07  [dongle] disconnected

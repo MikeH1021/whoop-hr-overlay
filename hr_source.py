@@ -554,10 +554,19 @@ class WhoopDirectSource(HeartRateSource):
             uuids = {c.uuid.lower() for s in client.services for c in s.characteristics}
             if HR_MEASUREMENT_UUID in uuids:
                 await client.start_notify(HR_MEASUREMENT_UUID, on_std)
+            # WHOOP's own channels need a bond; standard HR doesn't. Skip them
+            # if the band refuses rather than failing the whole connection.
+            whoop_ok = False
             for u in WHOOP_NOTIFY:
                 if u in uuids:
-                    await client.start_notify(u, on_whoop)
-            if WHOOP_CMD in uuids:
+                    try:
+                        await client.start_notify(u, on_whoop)
+                        whoop_ok = True
+                    except Exception as exc:
+                        self._log(f"WHOOP channel {u[:8]} unavailable ({exc!r}); "
+                                  "using standard HR only")
+                        break
+            if whoop_ok and WHOOP_CMD in uuids:
                 await client.write_gatt_char(WHOOP_CMD, wf.CLIENT_HELLO, response=True)
                 await asyncio.sleep(0.5)
                 if self._configure:
@@ -569,7 +578,7 @@ class WhoopDirectSource(HeartRateSource):
             last_kick = time.monotonic()
             while not self._stop.is_set() and client.is_connected:
                 await asyncio.sleep(0.5)
-                if WHOOP_CMD in uuids and time.monotonic() - last_kick > 60:
+                if whoop_ok and WHOOP_CMD in uuids and time.monotonic() - last_kick > 60:
                     await self._command(client, pending, 3, b"\x01")
                     last_kick = time.monotonic()
         self._on_status("Disconnected, retrying...")
