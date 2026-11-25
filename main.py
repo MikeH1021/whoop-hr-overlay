@@ -242,11 +242,12 @@ def main() -> None:
     # Which Bluetooth radio to use: "auto" picks a Zephyr hci_usb USB dongle
     # (driven directly via Bumble) when one is plugged in, else the OS radio.
     want_adapter = str(args.adapter or cfg.get("adapter", "auto")).lower()
-    adapter = {"kind": "system"}
+    adapter = {"kind": "system", "dongle": "absent"}
     if not args.simulate and want_adapter in ("auto", "dongle"):
-        from dongle_source import dongle_present
+        from dongle_source import dongle_state
 
-        if want_adapter == "dongle" or dongle_present():
+        adapter["dongle"] = dongle_state()
+        if want_adapter == "dongle" or adapter["dongle"] == "ready":
             adapter["kind"] = "dongle"
 
     def make_source(serial_):
@@ -292,17 +293,19 @@ def main() -> None:
             log_path=default_log_path(),
         )
 
-    def switch_band(name: str) -> None:
-        serial_ = name.split()[-1]  # "WHOOP MGB0663331" -> "MGB0663331"
-        cfg["serial"] = serial_
-        save_config(cfg)
+    def restart_source(message: str) -> None:
         old = holder["source"]
         holder["gen"] += 1  # silence the old source immediately
         if old is not None:
             old.stop()
-        win.set_status(f"Switching to {name}...")
-        holder["source"] = make_source(serial_)
+        win.set_status(message)
+        holder["source"] = make_source(cfg.get("serial") or serial)
         holder["source"].start()
+
+    def switch_band(name: str) -> None:
+        cfg["serial"] = name.split()[-1]  # "WHOOP MGB0663331" -> "MGB0663331"
+        save_config(cfg)
+        restart_source(f"Switching to {name}...")
 
     # System-tray icon: quit + band picker (the overlay itself is click-through
     # and has no taskbar entry).
@@ -324,13 +327,55 @@ def main() -> None:
             a.triggered.connect(lambda _=False, n=nm: switch_band(n))
 
     pick.aboutToShow.connect(fill_picker)
-    radio = menu.addAction("Bluetooth: USB dongle" if adapter["kind"] == "dongle"
-                           else "Bluetooth: built-in (system)")
+    radio = menu.addAction("")
     radio.setEnabled(False)
+
+    def label_radio() -> None:
+        radio.setText("Bluetooth: USB dongle" if adapter["kind"] == "dongle"
+                      else "Bluetooth: built-in (system)")
+
+    label_radio()
+
+    # USB dongle plugged in but missing its driver (Windows): offer the bundled
+    # driver installer, and switch over by itself once the driver is in.
+    from dongle_source import launch_driver_installer
+
+    driver_action = menu.addAction("Install USB dongle driver...")
+    driver_action.triggered.connect(lambda: launch_driver_installer())
+    driver_action.setVisible(adapter["dongle"] == "needs_driver")
+
+    def poll_dongle() -> None:
+        if args.simulate or adapter["kind"] == "dongle" or want_adapter == "system":
+            return
+        from dongle_source import dongle_state
+
+        state = dongle_state()
+        if state != adapter["dongle"] and state == "needs_driver":
+            tray.showMessage("USB dongle needs its driver",
+                             "Right-click the heart in the tray > Install USB dongle driver",
+                             QtWidgets.QSystemTrayIcon.Information, 10000)
+        adapter["dongle"] = state
+        driver_action.setVisible(state == "needs_driver")
+        if state == "ready":
+            adapter["kind"] = "dongle"
+            label_radio()
+            tray.showMessage("USB dongle ready", "Switched to the USB Bluetooth dongle.",
+                             QtWidgets.QSystemTrayIcon.Information, 5000)
+            restart_source("Switching to the USB dongle...")
+
+    dongle_timer = QtCore.QTimer(app)
+    dongle_timer.timeout.connect(poll_dongle)
+    dongle_timer.start(5000)
+
     menu.addSeparator()
     menu.addAction("Quit WHOOP HR Overlay", QtWidgets.QApplication.quit)
     tray.setContextMenu(menu)
     tray.show()
+    if adapter["dongle"] == "needs_driver":
+        QtCore.QTimer.singleShot(1500, lambda: tray.showMessage(
+            "USB dongle needs its driver",
+            "Right-click the heart in the tray > Install USB dongle driver",
+            QtWidgets.QSystemTrayIcon.Information, 10000))
 
     holder["source"] = make_source(serial)
     holder["source"].start()
@@ -339,7 +384,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 
 class LanBeacon:

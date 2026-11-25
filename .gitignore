@@ -9,3 +9,4 @@ dist/
 *.spec
 *.zip
 !firmware/*.zip
+drivers/*.exe

@@ -31,8 +31,9 @@ DONGLE_TRANSPORT = "usb:2FE3:000B"  # Zephyr hci_usb default VID:PID
 OWN_ADDRESS = "C0:FF:EE:48:52:01"   # random static address for the dongle
 
 
-def dongle_present() -> bool:
-    """True if a Zephyr hci_usb dongle is plugged in and openable via libusb."""
+def dongle_state() -> str:
+    """'ready' (plugged in and usable), 'needs_driver' (plugged in, but Windows
+    hasn't got WinUSB on it so libusb can't open it), or 'absent'."""
     try:
         import usb1  # from the libusb1 package (a Bumble dependency)
 
@@ -45,10 +46,39 @@ def dongle_present() -> bool:
         with usb1.USBContext() as ctx:
             for dev in ctx.getDeviceIterator(skip_on_error=True):
                 if dev.getVendorID() == 0x2FE3 and dev.getProductID() == 0x000B:
-                    return True
+                    try:
+                        dev.open().close()
+                        return "ready"
+                    except Exception:
+                        return "needs_driver"
     except Exception:
+        return "absent"
+    return "absent"
+
+
+def dongle_present() -> bool:
+    return dongle_state() == "ready"
+
+
+def launch_driver_installer() -> bool:
+    """Run the Zadig copy bundled inside the exe (Windows), with our preset."""
+    import os
+    import shutil
+    import sys
+    import tempfile
+
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    src = os.path.join(base, "drivers")
+    exe = os.path.join(src, "zadig-2.9.exe")
+    if sys.platform != "win32" or not os.path.exists(exe):
         return False
-    return False
+    dst = os.path.join(tempfile.gettempdir(), "whoop-hr-overlay-driver")
+    os.makedirs(dst, exist_ok=True)
+    for name in ("zadig-2.9.exe", "zadig.ini"):
+        if os.path.exists(os.path.join(src, name)):
+            shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+    os.startfile(os.path.join(dst, "zadig-2.9.exe"))  # Zadig asks for admin itself
+    return True
 
 
 class _AdvCache:

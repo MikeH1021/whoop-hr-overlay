@@ -1,8 +1,8 @@
 name: Build Windows EXE
 
-# Builds a standalone Windows .exe on a GitHub-hosted Windows runner and
-# attaches it to a GitHub Release. Triggers when you push a version tag
-# (e.g. v0.1.0), or manually from the Actions tab.
+# Builds ONE standalone Windows .exe (overlay + bundled USB-dongle driver
+# installer) on a GitHub-hosted Windows runner and attaches it to a GitHub
+# Release. Triggers on a version tag (e.g. v0.3.1), or manually from Actions.
 
 on:
   push:
@@ -30,82 +30,56 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Build standalone exe
-        run: >
-          pyinstaller --noconfirm --clean --onefile --windowed
-          --name whoop-hr-overlay
-          --collect-all bleak --collect-all bumble --collect-all libusb_package --hidden-import usb1 --hidden-import dongle_source
-          main.py
-
-      - name: Stage release files
-        shell: pwsh
-        run: |
-          Copy-Item config.example.json dist\config.example.json
-          Copy-Item README.md dist\README.md
-          Compress-Archive -Path dist\whoop-hr-overlay.exe, dist\config.example.json, dist\README.md -DestinationPath whoop-hr-overlay-windows.zip -Force
-
-      - name: Package dongle driver (Zadig + preset)
+      - name: Fetch + verify dongle driver installer (Zadig)
         shell: pwsh
         run: |
           $url = "https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe"
           $expected = "4ecaa95df3da3621486a043aef8b3050b8bafe7c901402871e816229ef82039b"
-          New-Item -ItemType Directory -Force whoop-dongle-driver | Out-Null
-          Invoke-WebRequest $url -OutFile whoop-dongle-driver\zadig-2.9.exe
-          $hash = (Get-FileHash whoop-dongle-driver\zadig-2.9.exe -Algorithm SHA256).Hash.ToLower()
+          Invoke-WebRequest $url -OutFile drivers\zadig-2.9.exe
+          $hash = (Get-FileHash drivers\zadig-2.9.exe -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne $expected) { throw "Zadig SHA-256 mismatch: $hash" }
-          $sig = Get-AuthenticodeSignature whoop-dongle-driver\zadig-2.9.exe
+          $sig = Get-AuthenticodeSignature drivers\zadig-2.9.exe
           Write-Host "Zadig signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
           if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Akeo") {
             throw "Zadig Authenticode check failed: $($sig.Status)"
           }
-          Copy-Item drivers\zadig.ini, drivers\INSTALL.txt whoop-dongle-driver\
-          Compress-Archive -Path whoop-dongle-driver -DestinationPath whoop-dongle-driver-windows.zip -Force
+
+      - name: Build standalone exe
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name whoop-hr-overlay
+          --collect-all bleak --collect-all bumble --collect-all libusb_package
+          --hidden-import usb1 --hidden-import dongle_source
+          --add-data "drivers/zadig-2.9.exe;drivers"
+          --add-data "drivers/zadig.ini;drivers"
+          main.py
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: whoop-hr-overlay-windows
-          path: |
-            dist/whoop-hr-overlay.exe
-            whoop-hr-overlay-windows.zip
+          path: dist/whoop-hr-overlay.exe
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/whoop-hr-overlay.exe
-            whoop-hr-overlay-windows.zip
-            firmware/hci_usb_nrf52840dongle_dfu.zip
-            whoop-dongle-driver-windows.zip
+          files: dist/whoop-hr-overlay.exe
           body: |
-            ## WHOOP Heart Rate Overlay — Windows build
+            ## WHOOP Heart Rate Overlay
 
-            Live heart rate + a 30-second graph in a corner of your screen, read straight off your
-            WHOOP 5.0/MG. Shows up in a **full-screen** Discord/OBS share.
+            **Download `whoop-hr-overlay.exe` below. That's the only file you need.**
 
-            ### Files
-            | File | What it's for |
-            |---|---|
-            | `whoop-hr-overlay.exe` | The overlay. Double-click it, no install. |
-            | `whoop-dongle-driver-windows.zip` | **USB dongle only:** Zadig (with a preset) to install the WinUSB driver once. Open `INSTALL.txt`. |
-            | `hci_usb_nrf52840dongle_dfu.zip` | **USB dongle only:** firmware for an nRF52840 dongle. Already flashed if you used ours. |
-            | `whoop-hr-overlay-windows.zip` | The exe + example config + README in one zip. |
+            1. Double-click it. (Windows may say "unknown publisher": **More info → Run anyway**.)
+            2. Right-click the **heart in the system tray** → **Choose your WHOOP** → pick your band.
+            3. Wear the band. Your heart rate + a 30-second graph appear top-left.
 
-            ### Setup
-            1. **If you use the nRF52840 USB dongle** (recommended when the PC's own Bluetooth is weak):
-               plug it in, unzip `whoop-dongle-driver-windows.zip`, run `zadig-2.9.exe`, pick
-               **WHOOP HR Overlay HCI** (`2FE3 000B`), click **Replace Driver**. One time only.
-            2. Run `whoop-hr-overlay.exe`. Right-click the heart in the system tray, open
-               **Choose your WHOOP**, and pick your band. Your choice is saved.
-            3. Wear the band. Heart rate is read from its standard HR channel, so **no pairing** is
-               needed and your phone stays connected to it.
+            **Using the nRF52840 USB dongle?** Just plug it in. If it needs its driver, the overlay
+            pops up a notice: right-click the tray heart → **Install USB dongle driver**, pick
+            **WHOOP HR Overlay HCI**, click **Replace Driver**. One time; the overlay switches to the
+            dongle by itself.
 
-            The tray shows which radio is in use (**USB dongle** or **built-in**) and has **Quit**.
+            **To show it in Discord:** share your whole **Screen**, and run the game in
+            **Borderless / Windowed Fullscreen**.
 
-            ### Make it show in Discord
-            - Share your whole **Screen** (not an Application Window).
-            - Run the game in **Borderless / Windowed Fullscreen**.
-
-            Windows may warn that the exe is from an unknown publisher (it's unsigned). Click
-            **More info → Run anyway**. Zadig is GPLv3, by Akeo Consulting (github.com/pbatard/libwdi).
+            Bundled driver installer: Zadig 2.9 (GPLv3, Akeo Consulting, github.com/pbatard/libwdi).
