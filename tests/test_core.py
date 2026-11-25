@@ -311,3 +311,14 @@ def test_dongle_busy_detection():
 
     assert dongle_busy(USBErrorAccess())
     assert not dongle_busy(RuntimeError("timeout"))
+
+
+def test_stale_instance_pids_exclude_self_and_bootloader():
+    import main
+
+    out = ('"whoop-hr-overlay.exe","100","Console","1","12 K"\n'
+           '"whoop-hr-overlay.exe","200","Console","1","90 K"\n'
+           '"whoop-hr-overlay.exe","300","Console","1","80 K"\n'
+           '"explorer.exe","400","Console","1","50 K"\n')
+    assert main.stale_pids(out, {200, 300}) == [100]
+    assert main.stale_pids("INFO: No tasks are running", {1}) == []

@@ -166,6 +166,35 @@ def build_opts(args: argparse.Namespace, cfg: dict) -> dict:
     }
 
 
+def stale_pids(tasklist_csv: str, own: set) -> list:
+    """PIDs of other whoop-hr-overlay.exe processes in `tasklist /FO CSV /NH`
+    output, excluding our own process and our PyInstaller bootloader parent."""
+    pids = []
+    for line in tasklist_csv.splitlines():
+        cols = [c.strip('"') for c in line.split('","')]
+        if len(cols) > 1 and cols[0].lower() == "whoop-hr-overlay.exe" and cols[1].isdigit():
+            if int(cols[1]) not in own:
+                pids.append(int(cols[1]))
+    return pids
+
+
+def kill_stale_instances() -> None:
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    import subprocess
+
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq whoop-hr-overlay.exe",
+                              "/FO", "CSV", "/NH"], capture_output=True, text=True,
+                             timeout=5, creationflags=flags).stdout
+        for pid in stale_pids(out, {os.getpid(), os.getppid()}):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True,
+                           timeout=5, creationflags=flags)
+    except Exception:
+        pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog="whoop-hr-overlay",
@@ -252,7 +281,10 @@ def main() -> None:
         probe.flush()
         probe.waitForBytesWritten(500)
         probe.disconnectFromServer()
-        QtCore.QThread.msleep(800)  # let it release its window + Bluetooth
+        QtCore.QThread.msleep(1500)  # let it release its window + Bluetooth
+    # Older versions could linger windowless after quitting, still holding the
+    # USB dongle (LIBUSB_ERROR_ACCESS). End any copy of us that is left.
+    kill_stale_instances()
     QLocalServer.removeServer(srv_name)
     server = QLocalServer()
     server.listen(srv_name)
@@ -511,7 +543,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 
 class LanBeacon:
