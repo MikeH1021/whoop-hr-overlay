@@ -54,6 +54,7 @@ def looks_like_whoop(name: str, uuids, mfg_ids) -> bool:
 # beacon. Names are cached per address because Windows often delivers the
 # name in a later packet than the first one it reports.
 SCAN_LISTENERS: list = []
+LOG_LISTENERS: list = []   # every source log line (main.py forwards to the LAN beacon)
 NAME_CACHE: dict = {}
 
 
@@ -175,6 +176,11 @@ class HeartRateSource:
             self._on_bpm(int(bpm))
 
     def _log(self, msg: str) -> None:
+        for fn in list(LOG_LISTENERS):
+            try:
+                fn(msg)
+            except Exception:
+                pass
         if not self._log_path:
             return
         try:
@@ -193,15 +199,21 @@ class SimulatedHeartRateSource(HeartRateSource):
         on_status: Optional[Callable[[str], None]] = None,
         base: int = 72,
         interval: float = 1.0,
+        on_pulse: Optional[Callable[[list, float], None]] = None,
+        on_extras: Optional[Callable[[dict], None]] = None,
     ) -> None:
         super().__init__(on_bpm, on_status)
         self._base = base
         self._interval = interval
+        self._on_pulse = on_pulse      # set => preview Active mode (fake PPG + HRV)
+        self._on_extras = on_extras
 
     async def _main(self) -> None:
         self._on_status("simulated")
         drift = 0.0
         t = 0.0
+        phase = 0.0
+        rate = 25.0
         while not self._stop.is_set():
             drift += random.uniform(-0.6, 0.6)
             drift = max(-10.0, min(28.0, drift))
@@ -210,6 +222,16 @@ class SimulatedHeartRateSource(HeartRateSource):
             hr = self._base + drift + surge + noise
             hr = max(45.0, min(195.0, hr))
             self._emit(round(hr))
+            if self._on_pulse:
+                from overlay import pulse_template
+
+                samples = []
+                for _ in range(int(rate * self._interval)):
+                    phase += hr / 60.0 / rate
+                    samples.append(pulse_template(phase) + random.uniform(-0.03, 0.03))
+                self._on_pulse(samples, rate)
+            if self._on_extras:
+                self._on_extras({"HRV": f"{random.randint(38, 62)} ms", "motion": "still"})
             t += self._interval
             await asyncio.sleep(self._interval)
 
@@ -427,7 +449,7 @@ class WhoopDirectSource(HeartRateSource):
                       if looks_like_whoop(n, u, list((a.manufacturer_data or {}).keys()))]
             listing = "\n".join(f"- {n}  ({r}dBm)" for r, n in whoops[:4])
             self._on_status(
-                "Right-click the heart in the tray > Choose your WHOOP.\n"
+                "Hover the overlay, click the gear > Source to pick your band.\n"
                 + (f"WHOOPs in range:\n{listing}" if listing else
                    f"No WHOOP broadcasting near this PC ({len(rows)} devices seen).")
             )

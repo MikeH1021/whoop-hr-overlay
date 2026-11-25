@@ -190,7 +190,7 @@ class WhoopDongleSource(HeartRateSource):
         if not self._serial:
             listing = "\n".join(f"- {r['name'] or '(unnamed)'}  ({r['rssi']}dBm)"
                                 for r in whoops[:4])
-            self._on_status("[dongle] Right-click the heart in the tray > Choose your WHOOP.\n"
+            self._on_status("Hover the overlay, click the gear > Source to pick your band.\n"
                             + (f"WHOOPs in range:\n{listing}" if listing
                                else f"No WHOOP in range ({len(rows)} devices seen)."))
             return None

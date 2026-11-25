@@ -34,54 +34,38 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
 
 ## ✨ Features
 
-- **Live BPM** — big, readable number in the corner, colored by HR zone (blue → green → yellow → red).
-- **Pulsing heart** — scales in sync with your current beat interval.
-- **30-second trend graph** — a smooth, filled sparkline so viewers see spikes and recovery, not just a number.
-- **Shows up in screen shares** — a normal layered desktop window, captured by Discord/OBS full-screen share and the Windows game bar alike.
-- **Click-through & always-on-top** — never steals a click from your game; sits above borderless-window games.
-- **Works with WHOOP _or_ any BLE strap** — uses the **standard** Bluetooth Heart Rate profile (`0x180D`). Polar, Garmin, Coospo, Wahoo, etc. all work.
-- **No hardware? No problem** — `--simulate` mode gives a realistic fake signal so you can place and style it first.
-- **Configurable** — corner, size, opacity, max-HR, colors-by-zone — via flags or a `config.json`.
+- **Live BPM** with a heart that pulses on every beat, colored by heart-rate zone.
+- **Two graphs:** a rolling heart-rate trend, and a **pulse waveform** underneath.
+- **Two modes**, picked in settings:
+  - **Passive** (your everyday band): heart rate from the band's standard HR channel. No pairing,
+    so the band stays connected to your phone app. The pulse graph is an animation timed to
+    your live heart rate (and labeled that way).
+  - **Active** (a dedicated band paired to this PC): the band's real **optical PPG waveform**
+    (~25 samples/s), **beat-to-beat R-R intervals with live HRV**, and **motion**. Uses a spare
+    band, because a band can only be connected to one app at a time.
+- **Gear on the overlay:** hover it to reveal a gear (settings) and a resize corner; drag it
+  anywhere to move it. Fonts, colors, opacity, corner radius, line width, which elements show,
+  and graph spans are all adjustable. Changes apply live and save automatically.
+- **Lock** makes it fully click-through for gaming (unlock from the tray heart).
+- **Shows up in screen shares:** a normal desktop window, so Discord/OBS full-screen capture
+  picks it up.
+- **USB dongle support:** an nRF52840 dongle with the included firmware gives a much stronger
+  Bluetooth radio than most desktop PCs (see [`firmware/`](firmware/README.md)).
+- **One download:** a single exe with the dongle driver installer built in.
 
-## 🔌 Direct WHOOP mode (default, v0.2+)
+## 🔌 How it reads your WHOOP
 
-The overlay talks to your WHOOP 5.0/MG **directly over its own Bluetooth protocol**. No phone
-relay, no WHOOP app. Put your band's serial in `config.json` next to the exe:
+It talks to the WHOOP 5.0/MG directly over Bluetooth, with no phone relay and no WHOOP app.
+Hover the overlay, click the gear, and under **Source** pick:
+- **Everyday band** for Passive mode, and/or
+- **Dedicated band** for Active mode.
 
-```json
-{ "serial": "MGB0663331" }
-```
+It only connects to the band you pick. Other WHOOPs in range are listed, but they're never
+connected to or changed. Wear the band: a WHOOP only sends heart rate while it detects a pulse.
 
-On connect it sends the WHOOP handshake, turns on live heart rate (command 3), and reads HR
-from the band's live-HR packets (or the standard HR channel, whichever arrives). With
-`"configure_band": true` (the default) it also turns on two of the band's own sharing settings,
-`make_hrfm_visible` and `whoop_live_2_hrm_devices`, so the band can share HR with a second device
-while it stays connected to your phone. Set it to `false` to leave the band's settings untouched.
-
-It **only ever connects to the serial you configure**. With no serial set, it just lists the
-WHOOPs in range so you can find yours, and never connects to (or changes) anyone else's band.
-Use `--standard` to read any ordinary Bluetooth HR strap instead.
-
-## 🩺 Getting heart rate out of your WHOOP
-
-This overlay speaks the **standard BLE Heart Rate profile**, the same one gym equipment uses.
-
-1. In the **WHOOP app**, turn on **Heart Rate Broadcast** (Bluetooth broadcasting). Your band
-   then advertises as a standard HR strap that anything can read. It broadcasts under the name
-   **`WHOOP <serial>`** (e.g. `WHOOP MGB0680949`).
-2. **Wear the band, snug, during use.** This is the #1 gotcha: a WHOOP only *streams* heart
-   rate while it's on your wrist detecting a pulse. Sitting on a desk, it will happily connect
-   but send **no numbers** and then drop the link after a few seconds.
-3. Run the overlay. It auto-discovers the nearest HR broadcaster, falling back to the nearest
-   device named `WHOOP*`. If several WHOOPs are nearby (yours + neighbors'), target yours
-   explicitly by putting its name in `config.json`, e.g. `"name": "WHOOP MGB0680949"`.
-
-> **No broadcast on your unit?** Any standard Bluetooth HR strap works as a stand-in, and the
-> companion research toolkit in this repo's sibling project (`../whoop/`) can pull live HR
-> straight off the WHOOP's private protocol if you'd rather go that route — but **broadcast mode
-> is by far the simplest path** and needs none of that.
-
----
+**Active mode:** the first connection pairs the dedicated band with this PC (the bond is saved
+next to the exe), then switches on the band's live sensor streams. When you quit or switch
+modes, it turns them back off.
 
 ## 🪟 Install on Windows
 

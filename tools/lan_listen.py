@@ -39,6 +39,14 @@ def main() -> None:
                 last_status[host] = m["status"]
                 print(f"[{ts}] {host} STATUS: {m['status']!r}", flush=True)
             continue
+        if m.get("kind") == "log":
+            print(f"[{ts}] {host} LOG: {m['msg']}", flush=True)
+            continue
+        if m.get("kind") == "extras":
+            if last_status.get(host + "#x") != m["extras"]:
+                last_status[host + "#x"] = m["extras"]
+                print(f"[{ts}] {host} EXTRAS: {m['extras']}", flush=True)
+            continue
         if m.get("kind") != "scan":
             continue
         key = (host, m["id"])

@@ -104,10 +104,12 @@ def build_opts(args: argparse.Namespace, cfg: dict) -> dict:
         "max_hr": int(pick("max_hr", 190)),
         "position": pick("position", "top-left"),
         "margin": int(pick("margin", 24)),
-        "opacity": float(pick("opacity", 0.96)),
+        "opacity": float(pick("opacity", 1.0)),
         "scale": float(pick("scale", 1.0)),
         "fps": int(pick("fps", 60)),
         "movable": bool(pick("movable", False)),
+        "geometry": cfg.get("geometry"),
+        "locked": bool(cfg.get("locked", False)),
     }
 
 
@@ -119,6 +121,9 @@ def main() -> None:
     ap.add_argument("--simulate", action="store_true",
                     help="use a fake HR signal instead of BLE (great for testing)")
     ap.add_argument("--serial", help="your WHOOP's serial, e.g. MGB0663331 (default: nearest WHOOP)")
+    ap.add_argument("--mode", choices=["passive", "active"],
+                    help="passive: everyday band (HR only); active: dedicated band (PPG, HRV)")
+    ap.add_argument("--active-serial", help="serial of the dedicated band for active mode")
     ap.add_argument("--adapter", choices=["auto", "dongle", "system"],
                     help="Bluetooth radio: auto (USB dongle if present), dongle, or system")
     ap.add_argument("--standard", action="store_true",
@@ -160,6 +165,12 @@ def main() -> None:
         return
 
     cfg = load_config(args.config)
+    if args.serial:
+        cfg["serial"] = args.serial
+    if args.mode:
+        cfg["hr_mode"] = args.mode
+    if args.active_serial:
+        cfg["active_serial"] = args.active_serial
     opts = build_opts(args, cfg)
 
     from PySide6 import QtCore, QtWidgets
@@ -207,15 +218,19 @@ def main() -> None:
 
     server.newConnection.connect(on_peer)
 
-    win = OverlayWindow(opts)
+    win = OverlayWindow(opts, cfg.get("style"))
 
     class Bridge(QtCore.QObject):
         bpm = QtCore.Signal(int)
         status = QtCore.Signal(str)
+        pulse = QtCore.Signal(list, float)
+        extras = QtCore.Signal(dict)
 
     bridge = Bridge()
     bridge.bpm.connect(win.set_bpm)
     bridge.status.connect(win.set_status)
+    bridge.pulse.connect(win.add_pulse)
+    bridge.extras.connect(win.set_extras)
 
     # LAN diagnostics beacon: each scan + status change is broadcast as JSON on
     # the local network (UDP 47999) so the developer can see what this PC sees.
@@ -227,71 +242,73 @@ def main() -> None:
     latest_whoops: list = []
 
     def on_scan(rows) -> None:
-        latest_whoops[:] = [r["name"] for r in rows
-                            if r["name"] and _hs.looks_like_whoop(r["name"], r["uuids"], r["mfg"])]
+        names = [r["name"] for r in rows
+                 if r["name"] and _hs.looks_like_whoop(r["name"], r["uuids"], r["mfg"])]
+        latest_whoops[:] = sorted(set(latest_whoops) | set(names))
         beacon.scan(rows)
 
     _hs.SCAN_LISTENERS.append(on_scan)
+    _hs.LOG_LISTENERS.append(beacon.log)
+    bridge.extras.connect(beacon.extras)
 
-    serial = args.serial or cfg.get("serial")
-    use_standard = args.standard or cfg.get("mode") == "standard" or (
-        not serial and (args.name or args.address or cfg.get("address"))
-    )
     holder = {"source": None, "gen": 0}
 
     # Which Bluetooth radio to use: "auto" picks a Zephyr hci_usb USB dongle
     # (driven directly via Bumble) when one is plugged in, else the OS radio.
-    want_adapter = str(args.adapter or cfg.get("adapter", "auto")).lower()
     adapter = {"kind": "system", "dongle": "absent"}
-    if not args.simulate and want_adapter in ("auto", "dongle"):
+
+    def choose_adapter() -> None:
+        want = str(args.adapter or cfg.get("adapter", "auto")).lower()
+        adapter["kind"] = "system"
+        if args.simulate or want == "system":
+            return
         from dongle_source import dongle_state
 
         adapter["dongle"] = dongle_state()
-        if want_adapter == "dongle" or adapter["dongle"] == "ready":
+        if want == "dongle" or adapter["dongle"] == "ready":
             adapter["kind"] = "dongle"
 
-    def make_source(serial_):
+    choose_adapter()
+
+    def make_source():
         # Callbacks are tied to this source's generation, so a stopped source
         # that is still finishing a scan can't overwrite the new one's status.
         gen = holder["gen"]
 
-        def on_bpm(b):
-            if holder["gen"] == gen:
-                bridge.bpm.emit(b)
+        def live(sig):
+            return lambda *a: holder["gen"] == gen and sig.emit(*a)
 
-        def on_status(s):
-            if holder["gen"] == gen:
-                bridge.status.emit(s)
+        on_bpm, on_status = live(bridge.bpm), live(bridge.status)
+        on_pulse, on_extras = live(bridge.pulse), live(bridge.extras)
+        active = cfg.get("hr_mode") == "active"
 
         if args.simulate:
-            return SimulatedHeartRateSource(on_bpm, on_status)
+            return SimulatedHeartRateSource(on_bpm, on_status, on_pulse=on_pulse if active else None,
+                                            on_extras=on_extras if active else None)
+        use_standard = args.standard or cfg.get("mode") == "standard"
+        if active and not use_standard:
+            from active_source import WhoopActiveSource
+
+            return WhoopActiveSource(on_bpm, on_status, on_pulse, on_extras,
+                                     serial=cfg.get("active_serial"),
+                                     use_dongle=adapter["kind"] == "dongle",
+                                     log_path=default_log_path())
+        serial = cfg.get("serial")
         if not use_standard and adapter["kind"] == "dongle":
             from dongle_source import WhoopDongleSource
 
-            return WhoopDongleSource(
-                on_bpm,
-                on_status,
-                serial=serial_,
-                configure_band=bool(cfg.get("configure_band", True)),
-                log_path=default_log_path(),
-            )
+            return WhoopDongleSource(on_bpm, on_status, serial=serial,
+                                     configure_band=bool(cfg.get("configure_band", True)),
+                                     log_path=default_log_path())
         if not use_standard:
-            # default: talk to the WHOOP directly over its own protocol
-            return WhoopDirectSource(
-                on_bpm,
-                on_status,
-                serial=serial_,
-                configure_band=bool(cfg.get("configure_band", True)),
-                log_path=default_log_path(),
-            )
-        return BleHeartRateSource(
-            on_bpm,
-            on_status,
-            address=(args.address or cfg.get("address")),
-            name=(args.name or cfg.get("name")),
-            scan_timeout=args.scan_timeout,
-            log_path=default_log_path(),
-        )
+            return WhoopDirectSource(on_bpm, on_status, serial=serial,
+                                     configure_band=bool(cfg.get("configure_band", True)),
+                                     log_path=default_log_path())
+        return BleHeartRateSource(on_bpm, on_status,
+                                  address=(args.address or cfg.get("address")),
+                                  name=(args.name or cfg.get("name")),
+                                  scan_timeout=args.scan_timeout,
+                                  log_path=default_log_path())
 
     def restart_source(message: str) -> None:
         old = holder["source"]
@@ -299,34 +316,63 @@ def main() -> None:
         if old is not None:
             old.stop()
         win.set_status(message)
-        holder["source"] = make_source(cfg.get("serial") or serial)
+        win.set_extras({})
+        holder["source"] = make_source()
         holder["source"].start()
 
-    def switch_band(name: str) -> None:
-        cfg["serial"] = name.split()[-1]  # "WHOOP MGB0663331" -> "MGB0663331"
+    # ---- settings (gear on the overlay) ---------------------------------
+    dialog_ref: dict = {}
+
+    def on_settings_change(what: str) -> None:
         save_config(cfg)
-        restart_source(f"Switching to {name}...")
+        if what == "style":
+            win.apply_style(cfg.get("style", {}))
+            win.set_max_hr(int(cfg.get("max_hr", 190)))
+        elif what == "window":
+            win.setWindowOpacity(float(cfg.get("opacity", 1.0)))
+            if bool(cfg.get("locked", False)) != win.locked:
+                win.set_locked(bool(cfg.get("locked", False)))
+                lock_action.setChecked(win.locked)
+        elif what == "source":
+            choose_adapter()
+            label_radio()
+            restart_source("Switching source...")
 
-    # System-tray icon: quit + band picker (the overlay itself is click-through
-    # and has no taskbar entry).
+    def open_settings() -> None:
+        from settings_dialog import SettingsDialog
+
+        dlg = dialog_ref.get("dlg")
+        if dlg is None or not dlg.isVisible():
+            dlg = SettingsDialog(cfg, lambda: list(latest_whoops), on_settings_change,
+                                 win.reset_geometry)
+            dialog_ref["dlg"] = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    win.settings_requested.connect(open_settings)
+
+    def on_geometry(x, y, w, h) -> None:
+        cfg["geometry"] = [x, y, w, h]
+        save_config(cfg)
+
+    win.geometry_changed.connect(on_geometry)
+
+    # ---- tray: fallback controls (always reachable, even when locked) ----
     tray = QtWidgets.QSystemTrayIcon(_make_tray_icon(), app)
-    tray.setToolTip("WHOOP HR Overlay (right-click for options)")
+    tray.setToolTip("WHOOP HR Overlay")
     menu = QtWidgets.QMenu()
-    pick = menu.addMenu("Choose your WHOOP")
+    menu.addAction("Settings...", open_settings)
+    lock_action = menu.addAction("Lock overlay (click-through)")
+    lock_action.setCheckable(True)
+    lock_action.setChecked(win.locked)
 
-    def fill_picker() -> None:
-        pick.clear()
-        names = sorted(set(latest_whoops))
-        if not names:
-            a = pick.addAction("No WHOOP broadcasting near this PC yet")
-            a.setEnabled(False)
-        for nm in names:
-            a = pick.addAction(nm)
-            a.setCheckable(True)
-            a.setChecked(bool(cfg.get("serial")) and cfg["serial"] in nm)
-            a.triggered.connect(lambda _=False, n=nm: switch_band(n))
+    def toggle_lock(on: bool) -> None:
+        cfg["locked"] = bool(on)
+        save_config(cfg)
+        win.set_locked(bool(on))
 
-    pick.aboutToShow.connect(fill_picker)
+    lock_action.toggled.connect(toggle_lock)
     radio = menu.addAction("")
     radio.setEnabled(False)
 
@@ -345,7 +391,8 @@ def main() -> None:
     driver_action.setVisible(adapter["dongle"] == "needs_driver")
 
     def poll_dongle() -> None:
-        if args.simulate or adapter["kind"] == "dongle" or want_adapter == "system":
+        want = str(args.adapter or cfg.get("adapter", "auto")).lower()
+        if args.simulate or adapter["kind"] == "dongle" or want == "system":
             return
         from dongle_source import dongle_state
 
@@ -377,14 +424,14 @@ def main() -> None:
             "Right-click the heart in the tray > Install USB dongle driver",
             QtWidgets.QSystemTrayIcon.Information, 10000))
 
-    holder["source"] = make_source(serial)
+    holder["source"] = make_source()
     holder["source"].start()
     app.aboutToQuit.connect(lambda: holder["source"] and holder["source"].stop())
     win.show()
     sys.exit(app.exec())
 
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 
 class LanBeacon:
@@ -422,6 +469,15 @@ class LanBeacon:
     def status(self, text: str) -> None:
         self.last_status = text
         self._send({"kind": "status", "status": text[:800]})
+
+    def log(self, msg: str) -> None:
+        msg = str(msg)
+        if msg.startswith("  ") and "dBm" in msg:
+            return  # per-device scan lines: already covered by the scan reports
+        self._send({"kind": "log", "msg": msg[:900]})
+
+    def extras(self, extras: dict) -> None:
+        self._send({"kind": "extras", "extras": {k: str(v) for k, v in extras.items()}})
 
     def scan(self, rows) -> None:
         # Broadcast datagrams can't be fragmented (macOS rejects >~1472 B), so

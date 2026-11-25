@@ -49,7 +49,7 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name whoop-hr-overlay
           --collect-all bleak --collect-all bumble --collect-all libusb_package
-          --hidden-import usb1 --hidden-import dongle_source
+          --hidden-import usb1 --hidden-import dongle_source --hidden-import active_source --hidden-import settings_dialog
           --add-data "drivers/zadig-2.9.exe;drivers"
           --add-data "drivers/zadig.ini;drivers"
           main.py

@@ -10,3 +10,5 @@ dist/
 *.zip
 !firmware/*.zip
 drivers/*.exe
+whoop-overlay-bonds.json
+whoop-overlay.log
