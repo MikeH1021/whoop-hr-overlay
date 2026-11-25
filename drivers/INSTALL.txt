@@ -1,0 +1,22 @@
+WHOOP HR Overlay - USB dongle driver (Windows, one time)
+=========================================================
+
+Needed only if you use the nRF52840 USB dongle (USB ID 2FE3:000B, shows up as
+"WHOOP HR Overlay HCI"). The overlay talks to it through libusb, which needs
+Windows' built-in WinUSB driver bound to the dongle.
+
+1. Plug the dongle into the PC.
+2. Unzip this folder anywhere and run zadig-2.9.exe (approve the admin prompt).
+   zadig.ini in the same folder preselects "List All Devices" and WinUSB.
+3. In the dropdown, choose  "WHOOP HR Overlay HCI"  (USB ID 2FE3 000B).
+   Make sure it's the dongle. Do NOT pick your keyboard, mouse, or another device.
+4. Target driver should read "WinUSB". Click "Replace Driver" (or "Install Driver").
+5. Start whoop-hr-overlay.exe. The tray menu shows "Bluetooth: USB dongle".
+
+Undo: Device Manager > Universal Serial Bus devices > WHOOP HR Overlay HCI >
+right-click > Uninstall device (tick "delete the driver"), then replug.
+
+Zadig 2.9 is by Pete Batard / Akeo Consulting, GPLv3. Source:
+https://github.com/pbatard/libwdi  (official download:
+https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe)
+SHA-256 4ecaa95df3da3621486a043aef8b3050b8bafe7c901402871e816229ef82039b

@@ -44,6 +44,23 @@ jobs:
           Copy-Item README.md dist\README.md
           Compress-Archive -Path dist\whoop-hr-overlay.exe, dist\config.example.json, dist\README.md -DestinationPath whoop-hr-overlay-windows.zip -Force
 
+      - name: Package dongle driver (Zadig + preset)
+        shell: pwsh
+        run: |
+          $url = "https://github.com/pbatard/libwdi/releases/download/v1.5.1/zadig-2.9.exe"
+          $expected = "4ecaa95df3da3621486a043aef8b3050b8bafe7c901402871e816229ef82039b"
+          New-Item -ItemType Directory -Force whoop-dongle-driver | Out-Null
+          Invoke-WebRequest $url -OutFile whoop-dongle-driver\zadig-2.9.exe
+          $hash = (Get-FileHash whoop-dongle-driver\zadig-2.9.exe -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $expected) { throw "Zadig SHA-256 mismatch: $hash" }
+          $sig = Get-AuthenticodeSignature whoop-dongle-driver\zadig-2.9.exe
+          Write-Host "Zadig signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Akeo") {
+            throw "Zadig Authenticode check failed: $($sig.Status)"
+          }
+          Copy-Item drivers\zadig.ini, drivers\INSTALL.txt whoop-dongle-driver\
+          Compress-Archive -Path whoop-dongle-driver -DestinationPath whoop-dongle-driver-windows.zip -Force
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -60,23 +77,35 @@ jobs:
             dist/whoop-hr-overlay.exe
             whoop-hr-overlay-windows.zip
             firmware/hci_usb_nrf52840dongle_dfu.zip
+            whoop-dongle-driver-windows.zip
           body: |
             ## WHOOP Heart Rate Overlay — Windows build
 
-            **Download `whoop-hr-overlay.exe`** below and double-click it. No Python needed.
+            Live heart rate + a 30-second graph in a corner of your screen, read straight off your
+            WHOOP 5.0/MG. Shows up in a **full-screen** Discord/OBS share.
 
-            It sits in the top-left corner showing your live heart rate + a 30-second graph,
-            and shows up in a **full-screen** Discord/OBS share.
+            ### Files
+            | File | What it's for |
+            |---|---|
+            | `whoop-hr-overlay.exe` | The overlay. Double-click it, no install. |
+            | `whoop-dongle-driver-windows.zip` | **USB dongle only:** Zadig (with a preset) to install the WinUSB driver once. Open `INSTALL.txt`. |
+            | `hci_usb_nrf52840dongle_dfu.zip` | **USB dongle only:** firmware for an nRF52840 dongle. Already flashed if you used ours. |
+            | `whoop-hr-overlay-windows.zip` | The exe + example config + README in one zip. |
 
-            ### First run
-            1. In the WHOOP app, enable **Heart Rate Broadcast** (or use any BLE HR strap).
-            2. Double-click `whoop-hr-overlay.exe`. It auto-connects to the nearest HR broadcaster.
-            3. To pin a specific strap or change the corner/size, drop a `config.json`
-               next to the exe (copy `config.example.json` and edit it).
+            ### Setup
+            1. **If you use the nRF52840 USB dongle** (recommended when the PC's own Bluetooth is weak):
+               plug it in, unzip `whoop-dongle-driver-windows.zip`, run `zadig-2.9.exe`, pick
+               **WHOOP HR Overlay HCI** (`2FE3 000B`), click **Replace Driver**. One time only.
+            2. Run `whoop-hr-overlay.exe`. Right-click the heart in the system tray, open
+               **Choose your WHOOP**, and pick your band. Your choice is saved.
+            3. Wear the band. Heart rate is read from its standard HR channel, so **no pairing** is
+               needed and your phone stays connected to it.
+
+            The tray shows which radio is in use (**USB dongle** or **built-in**) and has **Quit**.
 
             ### Make it show in Discord
             - Share your whole **Screen** (not an Application Window).
             - Run the game in **Borderless / Windowed Fullscreen**.
 
-            Windows may warn that the exe is from an unknown publisher (it's unsigned) —
-            click **More info → Run anyway**. See the README for full docs and troubleshooting.
+            Windows may warn that the exe is from an unknown publisher (it's unsigned). Click
+            **More info → Run anyway**. Zadig is GPLv3, by Akeo Consulting (github.com/pbatard/libwdi).
