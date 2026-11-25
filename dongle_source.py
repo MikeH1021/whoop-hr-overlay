@@ -190,16 +190,16 @@ class WhoopDongleSource(HeartRateSource):
         if not self._serial:
             listing = "\n".join(f"- {r['name'] or '(unnamed)'}  ({r['rssi']}dBm)"
                                 for r in whoops[:4])
-            self._on_status("Hover the overlay, click the gear > Source to pick your band.\n"
-                            + (f"WHOOPs in range:\n{listing}" if listing
-                               else f"No WHOOP in range ({len(rows)} devices seen)."))
+            self._on_status("Choose your band\nHover here and click the gear, then Source.\n"
+                            + (f"In range:\n{listing}" if listing
+                               else f"No WHOOP in range yet ({len(rows)} devices seen)."))
             return None
         for r in whoops:
             if r["name"] and self._serial.lower() in r["name"].lower():
                 self._log(f"[dongle] found {r['name']} at {r['rssi']} dBm")
                 return r
-        self._on_status(f"[dongle] {self._serial} not in range "
-                        f"({len(rows)} devices seen). Is the band broadcasting?")
+        self._on_status(f"Looking for {self._serial}\nNot heard yet ({len(rows)} devices "
+                        "seen). Is it charged and nearby?")
         return None
 
     # ------------------------------------------------------------------

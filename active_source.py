@@ -316,14 +316,14 @@ class WhoopActiveSource(HeartRateSource):
                     if not self._serial:
                         names = "\n".join(f"- {r['name'] or '(unnamed)'}  ({r['rssi']}dBm)"
                                           for r in whoops[:4]) or "(none in range)"
-                        self._on_status(f"{tag} Pick your dedicated band:\n"
-                                        f"gear > Source > Dedicated band.\n{names}")
+                        self._on_status("Choose your dedicated band\nHover here and click the "
+                                        f"gear, then Source > Dedicated band.\n{names}")
                         continue
                     target = next((r for r in whoops
                                    if r["name"] and self._serial.lower() in r["name"].lower()), None)
                     if target is None:
-                        self._on_status(f"{tag} {self._serial} not in range.\n"
-                                        "Is it charged and off your phone?")
+                        self._on_status(f"Looking for {self._serial}\nNot heard yet. Is it "
+                                        "charged, nearby, and off your phone?")
                         continue
                     await self._session(link, target, tag)
             except Exception as exc:

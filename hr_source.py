@@ -449,9 +449,9 @@ class WhoopDirectSource(HeartRateSource):
                       if looks_like_whoop(n, u, list((a.manufacturer_data or {}).keys()))]
             listing = "\n".join(f"- {n}  ({r}dBm)" for r, n in whoops[:4])
             self._on_status(
-                "Hover the overlay, click the gear > Source to pick your band.\n"
-                + (f"WHOOPs in range:\n{listing}" if listing else
-                   f"No WHOOP broadcasting near this PC ({len(rows)} devices seen).")
+                "Choose your band\nHover here and click the gear, then Source.\n"
+                + (f"In range:\n{listing}" if listing else
+                   f"No WHOOP in range yet ({len(rows)} devices seen).")
             )
             return None
         cands, seen = [], []
@@ -479,7 +479,7 @@ class WhoopDirectSource(HeartRateSource):
         top = sorted(seen, reverse=True)[:4]
         listing = "\n".join(f"- {n}  ({r}dBm)" for r, n, _a, _h in top) or "(nothing)"
         self._on_status(
-            f"{want} not broadcasting (connected to your phone?). Seeing:\n{listing}"
+            f"Looking for {want}\nNot heard yet. Is it charged and nearby?\nNearest:\n{listing}"
         )
         return None
 

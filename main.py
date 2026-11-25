@@ -110,6 +110,7 @@ def build_opts(args: argparse.Namespace, cfg: dict) -> dict:
         "movable": bool(pick("movable", False)),
         "geometry": cfg.get("geometry"),
         "locked": bool(cfg.get("locked", False)),
+        "snap": bool(cfg.get("snap", True)),
     }
 
 
@@ -173,7 +174,7 @@ def main() -> None:
         cfg["active_serial"] = args.active_serial
     opts = build_opts(args, cfg)
 
-    from PySide6 import QtCore, QtWidgets
+    from PySide6 import QtCore, QtGui, QtWidgets
 
     from hr_source import (
         BleHeartRateSource,
@@ -330,6 +331,7 @@ def main() -> None:
             win.set_max_hr(int(cfg.get("max_hr", 190)))
         elif what == "window":
             win.setWindowOpacity(float(cfg.get("opacity", 1.0)))
+            win.set_snap(bool(cfg.get("snap", True)))
             if bool(cfg.get("locked", False)) != win.locked:
                 win.set_locked(bool(cfg.get("locked", False)))
                 lock_action.setChecked(win.locked)
@@ -338,19 +340,28 @@ def main() -> None:
             label_radio()
             restart_source("Switching source...")
 
-    def open_settings() -> None:
+    def open_settings(start_tab: str = "") -> None:
         from settings_dialog import SettingsDialog
 
         dlg = dialog_ref.get("dlg")
         if dlg is None or not dlg.isVisible():
             dlg = SettingsDialog(cfg, lambda: list(latest_whoops), on_settings_change,
-                                 win.reset_geometry)
+                                 win.reset_geometry, start_tab=start_tab)
             dialog_ref["dlg"] = dlg
+            # open beside the overlay, kept on the same screen
+            dlg.adjustSize()
+            g = win.geometry()
+            screen = (QtGui.QGuiApplication.screenAt(g.center())
+                      or QtGui.QGuiApplication.primaryScreen()).availableGeometry()
+            x = g.right() + 12 if g.right() + 12 + dlg.width() <= screen.right() else g.left() - dlg.width() - 12
+            x = max(screen.left() + 8, min(x, screen.right() - dlg.width() - 8))
+            y = max(screen.top() + 8, min(g.top(), screen.bottom() - dlg.height() - 8))
+            dlg.move(x, y)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
 
-    win.settings_requested.connect(open_settings)
+    win.settings_requested.connect(lambda: open_settings())
 
     def on_geometry(x, y, w, h) -> None:
         cfg["geometry"] = [x, y, w, h]
@@ -362,7 +373,7 @@ def main() -> None:
     tray = QtWidgets.QSystemTrayIcon(_make_tray_icon(), app)
     tray.setToolTip("WHOOP HR Overlay")
     menu = QtWidgets.QMenu()
-    menu.addAction("Settings...", open_settings)
+    menu.addAction("Settings...", lambda: open_settings())
     lock_action = menu.addAction("Lock overlay (click-through)")
     lock_action.setCheckable(True)
     lock_action.setChecked(win.locked)
@@ -424,6 +435,14 @@ def main() -> None:
             "Right-click the heart in the tray > Install USB dongle driver",
             QtWidgets.QSystemTrayIcon.Information, 10000))
 
+    bridge.bpm.connect(lambda b: tray.setToolTip(f"WHOOP HR Overlay: {b} bpm"))
+
+    # First run: open settings on the Source tab so picking a band is obvious.
+    if not args.simulate and not cfg.get("onboarded"):
+        cfg["onboarded"] = True
+        save_config(cfg)
+        QtCore.QTimer.singleShot(1200, lambda: open_settings("source"))
+
     holder["source"] = make_source()
     holder["source"].start()
     app.aboutToQuit.connect(lambda: holder["source"] and holder["source"].stop())
@@ -431,7 +450,7 @@ def main() -> None:
     sys.exit(app.exec())
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 class LanBeacon:

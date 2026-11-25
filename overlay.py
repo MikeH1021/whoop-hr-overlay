@@ -1,10 +1,13 @@
 """The on-screen overlay: live BPM + pulsing heart, a rolling heart-rate graph,
-and a second graph with the pulse waveform (real PPG in Active mode, a
-beat-synced animation in Passive mode).
+and a pulse-waveform graph (real PPG in Active mode, a beat-synced animation
+in Passive mode).
 
-Interaction: hover to reveal a gear (opens settings) and a resize grip; drag
-anywhere else to move. "Locked" makes the whole window click-through.
-Layout scales with the window size; every visual is driven by ``style``.
+Everything is animated per frame (number count-up, color cross-fades, eased
+autoscale, continuously scrolling smooth curves), themeable (see THEMES), and
+the layout adapts to whatever size the user drags it to.
+
+Interaction: hover to reveal a gear (settings) and a resize grip; drag to move
+(snaps to screen edges); double-click for settings. "Locked" = click-through.
 """
 from __future__ import annotations
 
@@ -15,43 +18,89 @@ import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+DEFAULT_FONT = "Segoe UI" if platform.system() == "Windows" else "Helvetica Neue"
+
 DEFAULT_STYLE = {
-    "font_family": "Segoe UI",
+    "theme": "Midnight",
+    "font_family": DEFAULT_FONT,
     "font_scale": 1.0,
     "text_color": "#f6f8fb",
     "muted_color": "#9aa4b2",
     "bg_color": "#0c0e14",
-    "bg_opacity": 0.72,
+    "bg_opacity": 0.74,
+    "bg_gradient": True,
+    "border_alpha": 0.10,
     "color_mode": "zones",        # "zones" (by % of max HR) or "fixed"
     "accent_color": "#ff4d5e",
     "corner_radius": 16,
     "line_width": 2.0,
+    "glow": True,
+    "text_shadow": False,
     "show_heart": True,
     "show_hr_graph": True,
     "show_pulse_graph": True,
     "show_stats": True,
     "show_captions": True,
+    "show_grid": True,
+    "show_zone": True,
     "hr_window_s": 30,
     "pulse_window_s": 6,
 }
 
-DEFAULT_SIZE = (300, 170)
-MIN_SIZE = (150, 64)
+# Built-in looks. Applying one overwrites only these appearance keys.
+THEMES = {
+    "Midnight": dict(bg_color="#0c0e14", bg_opacity=0.74, bg_gradient=True, border_alpha=0.10,
+                     text_color="#f6f8fb", muted_color="#9aa4b2", color_mode="zones",
+                     accent_color="#ff4d5e", corner_radius=16, line_width=2.0, glow=True,
+                     text_shadow=False, font_family=DEFAULT_FONT),
+    "Glass": dict(bg_color="#24324a", bg_opacity=0.34, bg_gradient=True, border_alpha=0.28,
+                  text_color="#ffffff", muted_color="#d3dcec", color_mode="zones",
+                  accent_color="#7cc4ff", corner_radius=22, line_width=2.2, glow=True,
+                  text_shadow=True, font_family=DEFAULT_FONT),
+    "Neon": dict(bg_color="#08040f", bg_opacity=0.86, bg_gradient=True, border_alpha=0.22,
+                 text_color="#f6ecff", muted_color="#a98be0", color_mode="fixed",
+                 accent_color="#ff2bd6", corner_radius=12, line_width=2.4, glow=True,
+                 text_shadow=False, font_family=DEFAULT_FONT),
+    "Esports": dict(bg_color="#101010", bg_opacity=0.92, bg_gradient=False, border_alpha=0.0,
+                    text_color="#ffffff", muted_color="#a3a3a3", color_mode="fixed",
+                    accent_color="#ff3b3b", corner_radius=3, line_width=2.6, glow=False,
+                    text_shadow=False, font_family=DEFAULT_FONT),
+    "Minimal": dict(bg_color="#000000", bg_opacity=0.0, bg_gradient=False, border_alpha=0.0,
+                    text_color="#ffffff", muted_color="#e2e2e2", color_mode="zones",
+                    accent_color="#ff4d5e", corner_radius=0, line_width=2.2, glow=True,
+                    text_shadow=True, font_family=DEFAULT_FONT),
+    "Daylight": dict(bg_color="#f5f7fb", bg_opacity=0.94, bg_gradient=True, border_alpha=0.14,
+                     text_color="#12151b", muted_color="#5b6474", color_mode="zones",
+                     accent_color="#e0344a", corner_radius=16, line_width=2.0, glow=False,
+                     text_shadow=False, font_family=DEFAULT_FONT),
+    "Terminal": dict(bg_color="#020a04", bg_opacity=0.9, bg_gradient=False, border_alpha=0.3,
+                     text_color="#b8ffc2", muted_color="#4fae63", color_mode="fixed",
+                     accent_color="#39ff6a", corner_radius=2, line_width=1.6, glow=True,
+                     text_shadow=False, font_family="Consolas"),
+}
 
-ZONES = (  # (upper bound as fraction of max HR, color)
-    (0.50, "#6ea8fe"), (0.60, "#48cae4"), (0.70, "#3ddc97"),
-    (0.80, "#ffd166"), (0.90, "#ff9f45"), (9.99, "#ff5d6c"),
+DEFAULT_SIZE = (300, 170)
+MIN_SIZE = (120, 54)
+SNAP_PX = 18
+
+ZONES = (  # (upper bound as fraction of max HR, color, name)
+    (0.50, "#6ea8fe", "RECOVERY"), (0.60, "#48cae4", "WARM-UP"), (0.70, "#3ddc97", "AEROBIC"),
+    (0.80, "#ffd166", "TEMPO"), (0.90, "#ff9f45", "THRESHOLD"), (9.99, "#ff5d6c", "MAX"),
 )
 
 
-def zone_color(bpm, max_hr) -> QtGui.QColor:
+def zone_of(bpm, max_hr):
     if not bpm or not max_hr:
-        return QtGui.QColor("#9aa4b2")
+        return None, QtGui.QColor("#9aa4b2"), ""
     pct = bpm / float(max_hr)
-    for thr, col in ZONES:
+    for i, (thr, col, name) in enumerate(ZONES):
         if pct < thr:
-            return QtGui.QColor(col)
-    return QtGui.QColor(ZONES[-1][1])
+            return i + 1, QtGui.QColor(col), name
+    return len(ZONES), QtGui.QColor(ZONES[-1][1]), ZONES[-1][2]
+
+
+def zone_color(bpm, max_hr) -> QtGui.QColor:  # kept for compatibility
+    return zone_of(bpm, max_hr)[1]
 
 
 def pulse_template(phase: float) -> float:
@@ -61,6 +110,80 @@ def pulse_template(phase: float) -> float:
     return (math.exp(-((p - 0.16) / 0.065) ** 2)
             + 0.38 * math.exp(-((p - 0.44) / 0.085) ** 2)
             + 0.08 * math.exp(-((p - 0.75) / 0.2) ** 2))
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def _lerp_color(a: QtGui.QColor, b: QtGui.QColor, t: float) -> QtGui.QColor:
+    return QtGui.QColor.fromRgbF(_lerp(a.redF(), b.redF(), t), _lerp(a.greenF(), b.greenF(), t),
+                                 _lerp(a.blueF(), b.blueF(), t), _lerp(a.alphaF(), b.alphaF(), t))
+
+
+def smooth_path(pts) -> QtGui.QPainterPath:
+    """Catmull-Rom spline through the points, as cubic Beziers."""
+    path = QtGui.QPainterPath(pts[0])
+    n = len(pts)
+    if n < 3:
+        for q in pts[1:]:
+            path.lineTo(q)
+        return path
+    for i in range(n - 1):
+        p0 = pts[i - 1] if i > 0 else pts[i]
+        p1, p2 = pts[i], pts[i + 1]
+        p3 = pts[i + 2] if i + 2 < n else p2
+        path.cubicTo(p1 + (p2 - p0) / 6.0, p2 - (p3 - p1) / 6.0, p2)
+    return path
+
+
+def bucket_average(data, n):
+    """Average (t, v) pairs into at most n buckets. Smooths jitter and bounds
+    drawing cost; the last sample is kept exact so the live edge doesn't lag."""
+    if len(data) <= n or n < 2:
+        return data
+    size = len(data) / float(n - 1)
+    out = []
+    i = 0.0
+    last = len(data) - 1
+    while int(i) < last:
+        a, b = int(i), min(last, int(i + size))
+        chunk = data[a:b] or [data[a]]
+        out.append((sum(t for t, _ in chunk) / len(chunk), sum(v for _, v in chunk) / len(chunk)))
+        i += size
+    out.append(data[-1])
+    return out
+
+
+def bucket_extrema(data, n):
+    """Min/max decimation into at most n buckets (2 points each, in time
+    order). Unlike averaging, it keeps every waveform peak at full height."""
+    if len(data) <= 2 * n or n < 2:
+        return data
+    size = len(data) / float(n)
+    out = []
+    for b in range(n):
+        chunk = data[int(b * size):int((b + 1) * size)] or [data[min(len(data) - 1, int(b * size))]]
+        lo = min(chunk, key=lambda tv: tv[1])
+        hi = max(chunk, key=lambda tv: tv[1])
+        out.extend((lo, hi) if lo[0] <= hi[0] else (hi, lo))
+    out.append(data[-1])
+    return out
+
+
+class _Ease:
+    """Exponential ease toward a target value (frame-rate independent)."""
+
+    def __init__(self, speed: float) -> None:
+        self.v = None
+        self.speed = speed
+
+    def step(self, target: float, dt: float) -> float:
+        if self.v is None:
+            self.v = target
+        else:
+            self.v += (target - self.v) * (1.0 - math.exp(-self.speed * dt))
+        return self.v
 
 
 class OverlayWindow(QtWidgets.QWidget):
@@ -73,19 +196,26 @@ class OverlayWindow(QtWidgets.QWidget):
         self.style = dict(DEFAULT_STYLE, **(style or {}))
         self.max_hr = int(opts.get("max_hr", 190))
         self.locked = bool(opts.get("locked", False))
+        self.snap = bool(opts.get("snap", True))
 
         self.hr = collections.deque()          # (t, bpm)
         self.pulse = collections.deque()       # (t, value)
         self.current = None
-        self.status = "starting..."
-        self.extras: dict = {}                 # e.g. {"HRV": "54 ms"}
-        self.pulse_real_until = 0.0            # real PPG recently received
-        self._ppg_t = 0.0                      # next real-sample timestamp
+        self.status = "Starting..."
+        self.extras: dict = {}
+        self.pulse_real_until = 0.0
+        self._ppg_t = 0.0
         self._phase = 0.0
-        self._last_gen = time.monotonic()
+        self._last = time.monotonic()
+        self._last_gen = self._last
         self._beat_env = 0.0
-        self._scale_lo = None
-        self._scale_hi = None
+        # animated state
+        self._shown = _Ease(5.0)               # displayed BPM (counts toward target)
+        self._col = None                       # displayed accent color
+        self._hover_a = _Ease(10.0)
+        self._live_a = _Ease(4.0)              # cross-fade status view <-> live view
+        self._hr_lo, self._hr_hi = _Ease(2.5), _Ease(2.5)
+        self._pu_lo, self._pu_hi = _Ease(1.5), _Ease(1.5)
         self._hover = False
         self._drag = None
         self._resize = None
@@ -102,19 +232,19 @@ class OverlayWindow(QtWidgets.QWidget):
         self.setWindowOpacity(float(opts.get("opacity", 1.0)))
         self._place(opts.get("geometry"))
 
+        self._fps = max(10, int(opts.get("fps", 60)))
+        self._paint_ms = 0.0           # smoothed paint cost, drives adaptive fps
         self._timer = QtCore.QTimer(self)
+        self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(int(1000 / max(10, int(opts.get("fps", 60)))))
+        self._timer.start(int(1000 / self._fps))
 
-    # -- placement / locking ------------------------------------------------
+    # ------------------------------------------------------------ placement --
     def _place(self, geometry) -> None:
         if geometry and len(geometry) == 4:
             x, y, w, h = (int(v) for v in geometry)
             self.setGeometry(x, y, max(MIN_SIZE[0], w), max(MIN_SIZE[1], h))
-            # keep it on a visible screen if monitors changed
-            if QtGui.QGuiApplication.screenAt(self.geometry().center()) is None:
-                geometry = None
-            else:
+            if QtGui.QGuiApplication.screenAt(self.geometry().center()) is not None:
                 return
         w, h = DEFAULT_SIZE
         geo = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -131,8 +261,11 @@ class OverlayWindow(QtWidgets.QWidget):
     def set_locked(self, locked: bool) -> None:
         self.locked = bool(locked)
         self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, self.locked)
-        self.show()  # changing flags hides the window
+        self.show()
         self._apply_win32_styles()
+
+    def set_snap(self, on: bool) -> None:
+        self.snap = bool(on)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -155,7 +288,7 @@ class OverlayWindow(QtWidgets.QWidget):
         except Exception:
             pass
 
-    # -- style --------------------------------------------------------------
+    # ---------------------------------------------------------------- style --
     def apply_style(self, style: dict) -> None:
         self.style = dict(DEFAULT_STYLE, **style)
         self.update()
@@ -163,13 +296,13 @@ class OverlayWindow(QtWidgets.QWidget):
     def set_max_hr(self, v: int) -> None:
         self.max_hr = int(v)
 
-    # -- data in (GUI thread, via queued signals) ---------------------------
+    # ----------------------------------------------- data in (GUI thread) --
     @QtCore.Slot(int)
     def set_bpm(self, bpm: int) -> None:
         now = time.monotonic()
         self.current = int(bpm)
         self.hr.append((now, int(bpm)))
-        cutoff = now - max(10, int(self.style["hr_window_s"])) - 2
+        cutoff = now - max(10, int(self.style["hr_window_s"])) - 3
         while self.hr and self.hr[0][0] < cutoff:
             self.hr.popleft()
 
@@ -183,8 +316,8 @@ class OverlayWindow(QtWidgets.QWidget):
 
     @QtCore.Slot(list, float)
     def add_pulse(self, samples: list, rate: float) -> None:
-        """Real PPG samples (already detrended). Timestamps are spread over
-        the batch so bursty BLE delivery still scrolls smoothly."""
+        """Real PPG samples (already detrended), spread over the batch so bursty
+        BLE delivery still scrolls smoothly."""
         if not samples or rate <= 0:
             return
         now = time.monotonic()
@@ -205,22 +338,29 @@ class OverlayWindow(QtWidgets.QWidget):
     def pulse_is_real(self) -> bool:
         return time.monotonic() < self.pulse_real_until
 
-    # -- animation ----------------------------------------------------------
+    # ------------------------------------------------------------ animation --
     def _tick(self) -> None:
         now = time.monotonic()
-        dt = min(0.2, now - self._last_gen)
+        dt = min(0.1, max(0.0, now - self._last))
+        self._last = now
         bpm = self.current
         if bpm:
             self._phase += dt * bpm / 60.0
-            p = self._phase % 1.0
-            self._beat_env = max(0.0, 1.0 - p / 0.35) ** 1.6
+            self._beat_env = max(0.0, 1.0 - (self._phase % 1.0) / 0.35) ** 1.6
+            self._shown.step(float(bpm), dt)
         else:
             self._beat_env = 0.0
+        # accent color cross-fade
+        target = self._target_accent()
+        self._col = target if self._col is None else _lerp_color(
+            self._col, target, 1.0 - math.exp(-4.0 * dt))
+        self._hover_a.step(1.0 if (self._hover and not self.locked) else 0.0, dt)
+        self._live_a.step(1.0 if bpm else 0.0, dt)
         # beat-synced pulse animation when no real PPG is arriving
         if bpm and not self.pulse_is_real:
             t = self._last_gen
             step = 1.0 / 60.0
-            ph = self._phase - dt * bpm / 60.0
+            ph = self._phase - (now - t) * bpm / 60.0
             while t + step <= now:
                 t += step
                 ph += step * bpm / 60.0
@@ -231,45 +371,52 @@ class OverlayWindow(QtWidgets.QWidget):
         self._trim_pulse(now)
         self.update()
 
-    # -- geometry of interactive bits --------------------------------------
+    def _target_accent(self) -> QtGui.QColor:
+        if self.style["color_mode"] == "fixed":
+            return QtGui.QColor(self.style["accent_color"])
+        return zone_of(self.current, self.max_hr)[1]
+
+    # -------------------------------------------------------- interactions --
     def _k(self) -> float:
-        return max(0.6, min(self.width() / DEFAULT_SIZE[0], self.height() / DEFAULT_SIZE[1]))
+        return max(0.55, min(self.width() / DEFAULT_SIZE[0], self.height() / DEFAULT_SIZE[1]))
 
     def _gear_rect(self) -> QtCore.QRectF:
-        g = 18 * self._k()
-        return QtCore.QRectF(self.width() - g - 6, 6, g, g)
+        g = max(14.0, 17 * self._k())
+        return QtCore.QRectF(self.width() - g - 7, 7, g, g)
 
     def _grip_rect(self) -> QtCore.QRectF:
-        g = 16 * self._k()
-        return QtCore.QRectF(self.width() - g - 3, self.height() - g - 3, g, g)
+        g = max(12.0, 15 * self._k())
+        return QtCore.QRectF(self.width() - g - 4, self.height() - g - 4, g, g)
 
-    # -- mouse --------------------------------------------------------------
     def enterEvent(self, event) -> None:
         self._hover = True
-        self.update()
 
     def leaveEvent(self, event) -> None:
         self._hover = False
         self.unsetCursor()
-        self.update()
 
     def mousePressEvent(self, event) -> None:
         if event.button() != QtCore.Qt.LeftButton:
             return
         p = event.position()
-        if self._gear_rect().contains(p):
+        if self._gear_rect().adjusted(-4, -4, 4, 4).contains(p):
             self.settings_requested.emit()
-        elif self._grip_rect().contains(p):
+        elif self._grip_rect().adjusted(-4, -4, 4, 4).contains(p):
             self._resize = (event.globalPosition().toPoint(), self.size())
         else:
             self._drag = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self.setCursor(QtCore.Qt.ClosedHandCursor)
         event.accept()
 
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag = None
+            self.settings_requested.emit()
+
     def mouseMoveEvent(self, event) -> None:
         gp = event.globalPosition().toPoint()
         if self._drag is not None:
-            self.move(gp - self._drag)
+            self.move(self._snapped(gp - self._drag))
         elif self._resize is not None:
             start, size = self._resize
             d = gp - start
@@ -277,12 +424,32 @@ class OverlayWindow(QtWidgets.QWidget):
                         max(MIN_SIZE[1], size.height() + d.y()))
         else:
             p = event.position()
-            if self._gear_rect().contains(p):
+            if self._gear_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.PointingHandCursor)
-            elif self._grip_rect().contains(p):
+                QtWidgets.QToolTip.showText(gp, "Settings (or double-click)", self)
+            elif self._grip_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.SizeFDiagCursor)
             else:
                 self.setCursor(QtCore.Qt.OpenHandCursor)
+
+    def _snapped(self, pos: QtCore.QPoint) -> QtCore.QPoint:
+        if not self.snap:
+            return pos
+        screen = QtGui.QGuiApplication.screenAt(pos + QtCore.QPoint(self.width() // 2, 10))
+        if screen is None:
+            return pos
+        g = screen.availableGeometry()
+        m = 12
+        x, y = pos.x(), pos.y()
+        if abs(x - (g.left() + m)) < SNAP_PX:
+            x = g.left() + m
+        if abs((x + self.width()) - (g.right() - m)) < SNAP_PX:
+            x = g.right() - m - self.width()
+        if abs(y - (g.top() + m)) < SNAP_PX:
+            y = g.top() + m
+        if abs((y + self.height()) - (g.bottom() - m)) < SNAP_PX:
+            y = g.bottom() - m - self.height()
+        return QtCore.QPoint(x, y)
 
     def mouseReleaseEvent(self, event) -> None:
         if self._drag is not None or self._resize is not None:
@@ -298,89 +465,188 @@ class OverlayWindow(QtWidgets.QWidget):
         if event.key() == QtCore.Qt.Key_Escape:
             QtWidgets.QApplication.quit()
 
-    # -- painting -----------------------------------------------------------
-    def _font(self, px: float, bold: bool = True) -> QtGui.QFont:
-        f = QtGui.QFont(self.style["font_family"])
+    # -------------------------------------------------------------- drawing --
+    def _font(self, px: float, weight=QtGui.QFont.DemiBold, tabular=False) -> QtGui.QFont:
+        fam = self.style["font_family"]
+        f = QtGui.QFont(fam)
+        if any(s in fam.lower() for s in ("mono", "consolas", "courier", "menlo")):
+            f.setStyleHint(QtGui.QFont.TypeWriter)
         f.setPixelSize(max(6, int(px * float(self.style["font_scale"]))))
-        f.setBold(bold)
+        f.setWeight(weight)
+        if tabular:
+            try:
+                f.setFeature(QtGui.QFont.Tag("tnum"), 1)
+            except Exception:
+                pass
         return f
 
-    def _accent(self) -> QtGui.QColor:
-        if self.style["color_mode"] == "fixed":
-            return QtGui.QColor(self.style["accent_color"])
-        return zone_color(self.current, self.max_hr)
+    def _text(self, p, rect, flags, s, color) -> None:
+        if self.style["text_shadow"]:
+            p.setPen(QtGui.QColor(0, 0, 0, 150))
+            p.drawText(rect.translated(1.2, 1.4), flags, s)
+        p.setPen(color)
+        p.drawText(rect, flags, s)
 
     def paintEvent(self, _event) -> None:
+        t0 = time.perf_counter()
+        self._paint(_event)
+        ms = (time.perf_counter() - t0) * 1000.0
+        self._paint_ms += (ms - self._paint_ms) * 0.1
+        # Adaptive frame rate: if a (very large) overlay can't hold 60 fps,
+        # drop to 30 so it stays even instead of stuttering; recover when cheap.
+        want = self._fps
+        if self._paint_ms > 11.0:
+            want = min(self._fps, 30)
+        interval = int(1000 / want)
+        if self._timer.interval() != interval and (self._paint_ms > 11.0 or self._paint_ms < 6.0):
+            self._timer.setInterval(interval)
+
+    def _paint(self, _event) -> None:
         st = self.style
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         p.setRenderHint(QtGui.QPainter.TextAntialiasing, True)
         w, h, k = self.width(), self.height(), self._k()
-        col = self._accent()
+        col = self._col or self._target_accent()
         text = QtGui.QColor(st["text_color"])
         muted = QtGui.QColor(st["muted_color"])
 
-        bg = QtGui.QColor(st["bg_color"])
-        bg.setAlphaF(max(0.0, min(1.0, float(st["bg_opacity"]))))
-        r = float(st["corner_radius"]) * min(1.0, k)
-        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 26), 1))
-        p.setBrush(bg)
-        p.drawRoundedRect(QtCore.QRectF(0.5, 0.5, w - 1, h - 1), r, r)
-
-        pad = 10 * k
-        show_pulse = st["show_pulse_graph"]
-        top_h = h * 0.56 if show_pulse else h
-
-        if not self.current:
-            self._paint_status(p, pad, h, w, k, text, muted, col)
-        else:
-            self._paint_top(p, pad, top_h, w, k, text, muted, col)
-            if show_pulse:
-                self._paint_pulse(p, QtCore.QRectF(pad, top_h, w - 2 * pad, h - top_h - pad),
-                                  k, muted, col)
-
-        if self._hover and not self.locked:
-            self._paint_controls(p, k, text)
+        self._paint_background(p, w, h, k)
+        live = self._live_a.v or 0.0
+        if live < 0.999:
+            p.setOpacity(1.0 - live)
+            self._paint_status(p, w, h, k, text, muted, col)
+        if live > 0.001 and self.current:
+            p.setOpacity(live)
+            self._paint_live(p, w, h, k, text, muted, col)
+        p.setOpacity(1.0)
+        ha = self._hover_a.v or 0.0
+        if ha > 0.01:
+            self._paint_controls(p, k, text, ha)
         p.end()
 
-    def _paint_status(self, p, pad, h, w, k, text, muted, col) -> None:
-        x = pad
-        if self.style["show_heart"]:
-            self._draw_heart(p, pad + 12 * k, pad + 14 * k, 10 * k, col)
-            x = pad + 28 * k
-        p.setFont(self._font(11 * k, bold=False))
-        p.setPen(muted)
-        p.drawText(QtCore.QRectF(x, pad, w - x - pad - 22 * k, h - 2 * pad),
-                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
-                   self.status)
-
-    def _paint_top(self, p, pad, top_h, w, k, text, muted, col) -> None:
+    def _paint_background(self, p, w, h, k) -> None:
         st = self.style
-        stats_h = 14 * k if st["show_stats"] else 0
-        row_h = top_h - stats_h                      # number + graph row
-        x = pad
+        bg = QtGui.QColor(st["bg_color"])
+        a = max(0.0, min(1.0, float(st["bg_opacity"])))
+        r = float(st["corner_radius"]) * min(1.0, k)
+        rect = QtCore.QRectF(0.5, 0.5, w - 1, h - 1)
+        if a > 0:
+            if st["bg_gradient"]:
+                top = bg.lighter(135) if bg.lightness() < 128 else bg.lighter(104)
+                bot = bg.darker(115) if bg.lightness() >= 128 else bg
+                g = QtGui.QLinearGradient(0, 0, 0, h)
+                top.setAlphaF(a)
+                bot.setAlphaF(a)
+                g.setColorAt(0.0, top)
+                g.setColorAt(1.0, bot)
+                p.setBrush(g)
+            else:
+                bg.setAlphaF(a)
+                p.setBrush(bg)
+            p.setPen(QtCore.Qt.NoPen)
+            p.drawRoundedRect(rect, r, r)
+        ba = float(st["border_alpha"])
+        if ba > 0:
+            light = QtGui.QColor(st["bg_color"]).lightness() >= 128
+            bc = QtGui.QColor(0, 0, 0) if light else QtGui.QColor(255, 255, 255)
+            bc.setAlphaF(min(1.0, ba))
+            p.setPen(QtGui.QPen(bc, 1))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawRoundedRect(rect, r, r)
+
+    # -- layout --------------------------------------------------------------
+    def _layout(self, w, h, k):
+        """Rects for header (heart+number), hr graph, stats, pulse. Adapts to
+        size: compact strip, landscape, or portrait stack."""
+        st = self.style
+        pad = max(6.0, 10 * k)
+        portrait = h > w * 0.95
+        stats = st["show_stats"] and h >= 78
+        pulse = st["show_pulse_graph"] and h >= (120 if not portrait else 150)
+        hr_graph = st["show_hr_graph"] and w >= 170
+        R = QtCore.QRectF
+        if portrait:
+            head_h = min(h * (0.34 if pulse else 0.5), w * 0.55)
+            y = pad
+            L = {"head": R(pad, y, w - 2 * pad, head_h)}
+            y += head_h
+            rest = h - y - pad
+            sh = max(12.0, 14 * k) if stats else 0
+            gh = (rest - sh) * (0.45 if pulse else 1.0) if hr_graph else 0
+            L["hr"] = R(pad, y, w - 2 * pad, gh) if hr_graph else None
+            y += gh
+            L["stats"] = R(pad, y, w - 2 * pad, sh) if stats else None
+            y += sh
+            L["pulse"] = R(pad, y + 2, w - 2 * pad, h - y - pad - 2) if pulse else None
+            return L
+        top_h = h * 0.58 if pulse else h
+        sh = max(12.0, 14 * k) if stats else 0
+        row_h = top_h - sh
+        L = {"head": R(pad, pad * 0.3, w * 0.5, row_h - pad * 0.3)}
+        L["stats"] = R(pad, row_h - 2, w - 2 * pad, sh) if stats else None
+        L["pulse"] = R(pad, top_h + 2, w - 2 * pad, h - top_h - pad - 2) if pulse else None
+        L["hr"] = "right-of-head" if hr_graph else None
+        L["row_h"] = row_h
+        return L
+
+    def _paint_live(self, p, w, h, k, text, muted, col) -> None:
+        L = self._layout(w, h, k)
+        head = L["head"]
+        num_right = self._paint_head(p, head, k, text, muted, col)
+        hr = L["hr"]
+        if hr == "right-of-head":
+            pad = max(6.0, 10 * k)
+            gx = num_right + 12 * k
+            hr = QtCore.QRectF(gx, pad, w - gx - pad, L["row_h"] - pad * 1.3)
+            if hr.width() < 30 * k:
+                hr = None
+        if hr is not None and hr.height() > 8:
+            self._draw_hr_graph(p, hr, k, col, muted)
+        if L["stats"] is not None:
+            self._draw_stats(p, L["stats"], k, muted)
+        if L["pulse"] is not None and L["pulse"].height() > 10:
+            self._paint_pulse(p, L["pulse"], k, muted, col)
+
+    def _paint_head(self, p, r, k, text, muted, col) -> float:
+        """Heart + big number + caption inside r. Returns the x where it ends."""
+        st = self.style
+        x = r.left()
+        size_ref = min(r.height(), r.width() * 0.6)
         if st["show_heart"]:
-            size = row_h * 0.14 * (1.0 + 0.2 * self._beat_env)
-            self._draw_heart(p, x + row_h * 0.17, row_h * 0.46, size, col)
-            x += row_h * 0.36
-        p.setFont(self._font(row_h * 0.5))
-        p.setPen(text)
-        num = str(self.current)
-        num_w = p.fontMetrics().horizontalAdvance(num)
-        p.drawText(QtCore.QRectF(x, pad * 0.2, num_w + 4, row_h * 0.8),
-                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, num)
-        p.setFont(self._font(row_h * 0.12))
-        p.setPen(muted)
-        p.drawText(QtCore.QRectF(x + 2, row_h * 0.74, num_w + 40 * k, row_h * 0.22),
-                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, "BPM")
-        gx = x + max(num_w, 30 * k) + 14 * k
-        if st["show_hr_graph"] and w - gx - pad > 30 * k:
-            area = QtCore.QRectF(gx, pad, w - gx - pad - (24 * k if self._hover else 0),
-                                 row_h - pad * 1.2)
-            self._draw_hr_graph(p, area, k, col)
-        if st["show_stats"]:
-            self._draw_stats(p, QtCore.QRectF(pad, row_h, w - 2 * pad - (18 * k if self._hover else 0),
-                                              stats_h), k, muted)
+            hs = size_ref * 0.15 * (1.0 + 0.22 * self._beat_env)
+            cx = x + size_ref * 0.17
+            cy = r.top() + r.height() * 0.44
+            if st["glow"] and self._beat_env > 0.02:
+                halo = QtGui.QRadialGradient(QtCore.QPointF(cx, cy), hs * 2.4)
+                g0, g1 = QtGui.QColor(col), QtGui.QColor(col)
+                g0.setAlphaF(0.32 * self._beat_env)
+                g1.setAlphaF(0.0)
+                halo.setColorAt(0.0, g0)
+                halo.setColorAt(1.0, g1)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(halo)
+                p.drawEllipse(QtCore.QPointF(cx, cy), hs * 2.4, hs * 2.4)
+            self._draw_heart(p, cx, cy, hs, col)
+            x += size_ref * 0.37
+        shown = int(round(self._shown.v or self.current or 0))
+        p.setFont(self._font(size_ref * 0.56, QtGui.QFont.Bold, tabular=True))
+        num = str(shown)
+        fm = p.fontMetrics()
+        num_w = fm.horizontalAdvance("8" * len(num))   # stable width while counting
+        nr = QtCore.QRectF(x, r.top(), num_w + 4, r.height() * 0.8)
+        self._text(p, nr, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, num, text)
+        cap = "BPM"
+        if st["show_zone"] and st["color_mode"] == "zones" and self.current:
+            z, _c, name = zone_of(self.current, self.max_hr)
+            if z:
+                cap = f"BPM  ·  Z{z} {name}"
+        p.setFont(self._font(max(8.0, size_ref * 0.11), QtGui.QFont.DemiBold))
+        cap_w = p.fontMetrics().horizontalAdvance(cap)
+        self._text(p, QtCore.QRectF(x + 2, r.top() + r.height() * 0.74, cap_w + 4,
+                                    r.height() * 0.22),
+                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap, muted)
+        return x + max(num_w, min(cap_w, num_w * 1.6))
 
     def _draw_stats(self, p, rect, k, muted) -> None:
         now = time.monotonic()
@@ -388,13 +654,12 @@ class OverlayWindow(QtWidgets.QWidget):
         vals = [v for t, v in self.hr if t >= now - win]
         parts = []
         if vals:
-            parts.append(f"min {min(vals)}  avg {round(sum(vals) / len(vals))}  max {max(vals)}")
+            parts.append(f"min {min(vals)}   avg {round(sum(vals) / len(vals))}   max {max(vals)}")
         parts += [f"{key} {val}" for key, val in self.extras.items()]
-        p.setFont(self._font(9.5 * k, bold=False))
-        p.setPen(muted)
-        text = p.fontMetrics().elidedText("   ·   ".join(parts), QtCore.Qt.ElideRight,
-                                          int(rect.width()))
-        p.drawText(rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+        p.setFont(self._font(max(8.0, 9.5 * k), QtGui.QFont.Medium, tabular=True))
+        s = p.fontMetrics().elidedText("     ".join(parts), QtCore.Qt.ElideRight,
+                                       int(rect.width()))
+        self._text(p, rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, s, muted)
 
     def _draw_heart(self, p, cx, cy, size, color) -> None:
         path = QtGui.QPainterPath()
@@ -407,110 +672,238 @@ class OverlayWindow(QtWidgets.QWidget):
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(color)
         p.drawPath(path)
-        p.setBrush(QtGui.QColor(255, 255, 255, 60))
-        p.drawEllipse(QtCore.QPointF(cx - size * 0.45, cy - size * 0.35), size * 0.28, size * 0.22)
+        p.setBrush(QtGui.QColor(255, 255, 255, 70))
+        p.drawEllipse(QtCore.QPointF(cx - size * 0.45, cy - size * 0.35), size * 0.28, size * 0.2)
         p.restore()
 
-    def _line(self, p, pts, rect, color, k) -> None:
-        area = QtGui.QPainterPath()
-        area.moveTo(pts[0].x(), rect.bottom())
-        for pt in pts:
-            area.lineTo(pt)
-        area.lineTo(pts[-1].x(), rect.bottom())
-        area.closeSubpath()
-        grad = QtGui.QLinearGradient(0, rect.top(), 0, rect.bottom())
-        c0, c1 = QtGui.QColor(color), QtGui.QColor(color)
-        c0.setAlpha(110)
-        c1.setAlpha(6)
-        grad.setColorAt(0.0, c0)
-        grad.setColorAt(1.0, c1)
-        p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(grad)
-        p.drawPath(area)
-        line = QtGui.QPainterPath(pts[0])
-        for pt in pts[1:]:
-            line.lineTo(pt)
-        p.setBrush(QtCore.Qt.NoBrush)
-        p.setPen(QtGui.QPen(color, float(self.style["line_width"]) * max(0.7, k),
-                            QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
-        p.drawPath(line)
+    def _stroke(self, p, pts, rect, color, k, fill=True) -> None:
+        """Gradient area + (optional glow) + line through pts.
 
-    def _draw_hr_graph(self, p, rect, k, col) -> None:
+        Dense data (< 6 px per point) is drawn as a polyline: at that density
+        it's visually identical to a spline and far cheaper to rasterise at
+        large sizes. Sparse data gets a Catmull-Rom spline so it reads smooth.
+        """
+        if len(pts) < 2:
+            return
+        span = pts[-1].x() - pts[0].x()
+        sparse = span / max(1, len(pts) - 1) > 6
+        if sparse:
+            path = smooth_path(pts)
+        else:
+            path = QtGui.QPainterPath()
+            path.addPolygon(QtGui.QPolygonF(pts))
+        if fill:
+            grad = QtGui.QLinearGradient(0, rect.top(), 0, rect.bottom())
+            c0, c1 = QtGui.QColor(color), QtGui.QColor(color)
+            c0.setAlphaF(0.38)
+            c1.setAlphaF(0.0)
+            grad.setColorAt(0.0, c0)
+            grad.setColorAt(1.0, c1)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(grad)
+            base_r = QtCore.QPointF(pts[-1].x(), rect.bottom())
+            base_l = QtCore.QPointF(pts[0].x(), rect.bottom())
+            if sparse:
+                area = QtGui.QPainterPath(path)
+                area.lineTo(base_r)
+                area.lineTo(base_l)
+                area.closeSubpath()
+                p.drawPath(area)
+            else:
+                p.drawPolygon(QtGui.QPolygonF(list(pts) + [base_r, base_l]))
+        # line width grows with size, but capped so big overlays stay crisp + fast
+        lw = float(self.style["line_width"]) * min(1.8, max(0.75, k))
+        p.setBrush(QtCore.Qt.NoBrush)
+        if self.style["glow"]:
+            self._glow(p, path, color, lw)
+        p.setPen(QtGui.QPen(color, lw, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap,
+                            QtCore.Qt.RoundJoin))
+        if sparse:
+            p.drawPath(path)
+        else:
+            p.drawPolyline(QtGui.QPolygonF(pts))
+
+    def _glow(self, p, path, color, lw) -> None:
+        """Soft glow: wide strokes drawn into a 1/3-resolution image, then scaled
+        up smoothly. About 9x cheaper than full-resolution wide strokes, and
+        the upscale softens it nicely."""
+        pad = lw * 3.0
+        br = path.boundingRect().adjusted(-pad, -pad, pad, pad)
+        s = 1.0 / 3.0 if br.width() < 500 else 1.0 / 4.0
+        iw, ih = max(1, int(br.width() * s) + 1), max(1, int(br.height() * s) + 1)
+        img = QtGui.QImage(iw, ih, QtGui.QImage.Format_ARGB32_Premultiplied)
+        img.fill(QtCore.Qt.transparent)
+        q = QtGui.QPainter(img)
+        q.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        q.scale(s, s)
+        q.translate(-br.left(), -br.top())
+        g = QtGui.QColor(color)
+        for width, alpha in ((lw * 5.0, 0.11), (lw * 2.6, 0.2)):
+            g.setAlphaF(alpha)
+            q.setPen(QtGui.QPen(g, width, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap,
+                                QtCore.Qt.RoundJoin))
+            q.drawPath(path)
+        q.end()
+        p.save()
+        p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QtCore.QRectF(br.left(), br.top(), iw / s, ih / s), img)
+        p.restore()
+
+    def _grid(self, p, rect, muted) -> None:
+        if not self.style["show_grid"]:
+            return
+        g = QtGui.QColor(muted)
+        g.setAlphaF(0.12)
+        pen = QtGui.QPen(g, 1, QtCore.Qt.DashLine)
+        pen.setDashPattern([2, 4])
+        p.setPen(pen)
+        for f in (0.25, 0.5, 0.75):
+            y = rect.top() + rect.height() * f
+            p.drawLine(QtCore.QPointF(rect.left(), y), QtCore.QPointF(rect.right(), y))
+
+    def _draw_hr_graph(self, p, rect, k, col, muted) -> None:
         now = time.monotonic()
         win = max(5, int(self.style["hr_window_s"]))
         t0 = now - win
-        data = [(t, v) for t, v in self.hr if t >= t0]
-        if len(data) < 2:
+        data = [(t, v) for t, v in self.hr if t >= t0 - 2]
+        if len(data) < 1:
             return
+        data = bucket_average(data, int(max(12, rect.width() / 7)))  # ~1 point per 7 px
+        # extend to "now" with the animated value so the trace scrolls smoothly
+        data.append((now, self._shown.v or data[-1][1]))
         vals = [v for _, v in data]
         lo, hi = float(min(vals)), float(max(vals))
         if hi - lo < 10:
             mid = (hi + lo) / 2
             lo, hi = mid - 5, mid + 5
-        lo, hi = lo - 3, hi + 3
+        dt = 1 / 60
+        lo = self._hr_lo.step(lo - 3, dt)
+        hi = self._hr_hi.step(hi + 3, dt)
+        span = max(1.0, hi - lo)
+        self._grid(p, rect, muted)
         pts = [QtCore.QPointF(rect.left() + (t - t0) / win * rect.width(),
-                              rect.bottom() - (v - lo) / (hi - lo) * rect.height())
+                              rect.bottom() - max(0.0, min(1.0, (v - lo) / span)) * rect.height())
                for t, v in data]
-        self._line(p, pts, rect, col, k)
+        p.save()
+        p.setClipRect(rect.adjusted(-2, -6, 6, 2))
+        self._stroke(p, pts, rect, col, k)
+        p.restore()
+        # live dot with a ring that pulses on each beat
+        end = pts[-1]
+        ring = QtGui.QColor(col)
+        ring.setAlphaF(0.35 * self._beat_env)
         p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(ring)
+        rr = (3.0 + 5.0 * self._beat_env) * k
+        p.drawEllipse(end, rr, rr)
         p.setBrush(col)
-        p.drawEllipse(pts[-1], 2.8 * k, 2.8 * k)
+        p.drawEllipse(end, 2.8 * k, 2.8 * k)
 
     def _paint_pulse(self, p, rect, k, muted, col) -> None:
         real = self.pulse_is_real
-        if self.style["show_captions"]:
-            p.setFont(self._font(8.5 * k, bold=True))
-            p.setPen(muted)
-            cap = "PPG  live from band" if real else "PULSE  from heart rate"
-            p.drawText(QtCore.QRectF(rect.left(), rect.top(), rect.width(), 12 * k),
-                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap)
-            rect = rect.adjusted(0, 13 * k, 0, 0)
+        if self.style["show_captions"] and rect.height() > 30 * k:
+            p.setFont(self._font(8.2 * k, QtGui.QFont.Bold))
+            cap = "PPG  ·  LIVE FROM BAND" if real else "PULSE  ·  FROM HEART RATE"
+            if real:
+                dot = QtGui.QColor("#3ddc97")
+                dot.setAlphaF(0.55 + 0.45 * self._beat_env)
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(dot)
+                p.drawEllipse(QtCore.QPointF(rect.left() + 3 * k, rect.top() + 6 * k), 2.6 * k, 2.6 * k)
+                capr = QtCore.QRectF(rect.left() + 9 * k, rect.top(), rect.width(), 12 * k)
+            else:
+                capr = QtCore.QRectF(rect.left(), rect.top(), rect.width(), 12 * k)
+            self._text(p, capr, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap, muted)
+            rect = rect.adjusted(0, 14 * k, 0, 0)
         now = time.monotonic()
-        delay = 1.0 if real else 0.0   # absorb bursty BLE delivery
+        delay = 1.0 if real else 0.0
         win = max(2, int(self.style["pulse_window_s"]))
         t1 = now - delay
         t0 = t1 - win
-        data = [(t, v) for t, v in self.pulse if t0 <= t <= t1]
+        data = [(t, v) for t, v in self.pulse if t0 - 0.2 <= t <= t1]
         if len(data) < 3 or rect.height() < 6:
             return
+        data = bucket_extrema(data, int(max(20, rect.width() / 3)))  # peaks preserved
         vals = [v for _, v in data]
         lo, hi = min(vals), max(vals)
         if hi - lo < 1e-6:
             hi = lo + 1.0
-        # smooth autoscale so the trace doesn't jump around
-        a = 0.08
-        self._scale_lo = lo if self._scale_lo is None else self._scale_lo + a * (lo - self._scale_lo)
-        self._scale_hi = hi if self._scale_hi is None else self._scale_hi + a * (hi - self._scale_hi)
-        lo, hi = self._scale_lo, self._scale_hi
+        lo = self._pu_lo.step(lo, 1 / 60)
+        hi = self._pu_hi.step(hi, 1 / 60)
         span = (hi - lo) or 1.0
+        top, height = rect.top() + rect.height() * 0.06, rect.height() * 0.9
         pts = [QtCore.QPointF(rect.left() + (t - t0) / win * rect.width(),
-                              rect.bottom() - max(0.0, min(1.0, (v - lo) / span)) * rect.height())
+                              top + height - max(0.0, min(1.0, (v - lo) / span)) * height)
                for t, v in data]
-        self._line(p, pts, rect, col, k)
+        p.save()
+        p.setClipRect(rect.adjusted(-2, -4, 2, 2))
+        self._stroke(p, pts, rect, col, k, fill=True)
+        p.restore()
 
-    def _paint_controls(self, p, k, text) -> None:
-        # gear
+    def _paint_status(self, p, w, h, k, text, muted, col) -> None:
+        """Connecting / setup view: spinner, a title and a friendly detail."""
+        pad = max(6.0, 10 * k)
+        lines = [s for s in (self.status or "").split("\n") if s.strip()]
+        title = lines[0] if lines else "Starting..."
+        if title.startswith("["):
+            title = title.split("] ", 1)[-1]
+        detail = "\n".join(lines[1:])
+        x = pad + 28 * k
+        avail_w = w - x - pad - 20 * k
+        tfont = self._font(12.5 * k, QtGui.QFont.Bold)
+        dfont = self._font(max(8.5, 9.5 * k), QtGui.QFont.Normal)
+        flags_wrap = QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap
+        t_h = QtGui.QFontMetrics(tfont).boundingRect(
+            QtCore.QRect(0, 0, int(avail_w), 1000), flags_wrap, title).height()
+        t_h = min(t_h, QtGui.QFontMetrics(tfont).lineSpacing() * 2)
+        d_h = QtGui.QFontMetrics(dfont).boundingRect(
+            QtCore.QRect(0, 0, int(w - x - pad), 1000), flags_wrap, detail).height() if detail else 0
+        block = t_h + (d_h + 4 * k if detail else 0)
+        y0 = max(pad, (h - block) / 2)            # vertically centred block
+        # spinner, aligned with the title's first line
+        c = QtCore.QPointF(pad + 11 * k, y0 + QtGui.QFontMetrics(tfont).lineSpacing() / 2)
+        rad = 8 * k
+        track = QtGui.QColor(muted)
+        track.setAlphaF(0.25)
+        p.setPen(QtGui.QPen(track, 2.2 * k))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawEllipse(c, rad, rad)
+        ang = (time.monotonic() * 300) % 360
+        pen = QtGui.QPen(col, 2.2 * k, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(QtCore.QRectF(c.x() - rad, c.y() - rad, 2 * rad, 2 * rad),
+                  int(-ang * 16), int(-100 * 16))
+        p.setFont(tfont)
+        tr = QtCore.QRectF(x, y0, avail_w, t_h)
+        self._text(p, tr, flags_wrap, title, text)
+        if detail:
+            p.setFont(dfont)
+            self._text(p, QtCore.QRectF(x, tr.bottom() + 4 * k, w - x - pad, h - tr.bottom() - pad),
+                       flags_wrap, detail, muted)
+
+    def _paint_controls(self, p, k, text, alpha) -> None:
+        p.save()
+        p.setOpacity(alpha)
         g = self._gear_rect()
         c = g.center()
-        p.save()
+        light = QtGui.QColor(self.style["bg_color"]).lightness() >= 128
+        chip = QtGui.QColor(255, 255, 255, 200) if light else QtGui.QColor(0, 0, 0, 140)
         p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(QtGui.QColor(0, 0, 0, 120))
-        p.drawEllipse(c, g.width() / 2 + 2, g.height() / 2 + 2)
+        p.setBrush(chip)
+        p.drawEllipse(c, g.width() / 2 + 3, g.height() / 2 + 3)
         p.setBrush(text)
         rad = g.width() / 2
         gear = QtGui.QPainterPath()
         for i in range(8):
-            ang = i * math.pi / 4
             tooth = QtGui.QPainterPath()
             tw, th = rad * 0.34, rad * 0.32
             tooth.addRect(QtCore.QRectF(-tw / 2, -rad, tw, th))
-            tr = QtGui.QTransform().translate(c.x(), c.y()).rotateRadians(ang)
+            tr = QtGui.QTransform().translate(c.x(), c.y()).rotateRadians(i * math.pi / 4)
             gear.addPath(tr.map(tooth))
         gear.addEllipse(c, rad * 0.72, rad * 0.72)
         hole = QtGui.QPainterPath()
         hole.addEllipse(c, rad * 0.3, rad * 0.3)
         p.drawPath(gear.simplified().subtracted(hole))
-        # resize grip
         gr = self._grip_rect()
         pen = QtGui.QPen(text, max(1.0, 1.4 * k))
         pen.setCapStyle(QtCore.Qt.RoundCap)

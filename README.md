@@ -43,9 +43,18 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
   - **Active** (a dedicated band paired to this PC): the band's real **optical PPG waveform**
     (~25 samples/s), **beat-to-beat R-R intervals with live HRV**, and **motion**. Uses a spare
     band, because a band can only be connected to one app at a time.
-- **Gear on the overlay:** hover it to reveal a gear (settings) and a resize corner; drag it
-  anywhere to move it. Fonts, colors, opacity, corner radius, line width, which elements show,
-  and graph spans are all adjustable. Changes apply live and save automatically.
+- **Themes:** Midnight, Glass, Neon, Esports, Minimal, Daylight and Terminal, picked from live
+  preview cards. Tweak any of them (font, text size, colors, glow, gradient, border, opacity,
+  corner radius, line width) and it becomes your own Custom theme.
+- **Smooth:** the number counts toward each new reading, zone colors cross-fade, graphs are
+  soft-glowing curves that scroll continuously, and autoscaling eases instead of jumping.
+  It holds 60 fps (about 2-5 ms per frame), and drops to an even 30 fps rather than
+  stuttering if a huge overlay ever gets expensive.
+- **Responsive layout:** drag it to any size. It adapts from a compact strip to a tall
+  vertical stack, hiding the pulse graph and stats when they won't fit.
+- **Gear on the overlay:** hover to reveal a gear (settings) and a resize corner. Drag to
+  move (it snaps to screen edges), and double-click to open settings. Everything saves
+  automatically, and the settings window opens beside the overlay.
 - **Lock** makes it fully click-through for gaming (unlock from the tray heart).
 - **Shows up in screen shares:** a normal desktop window, so Discord/OBS full-screen capture
   picks it up.
