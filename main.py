@@ -581,7 +581,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 
 
 class LanBeacon:

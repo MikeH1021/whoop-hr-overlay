@@ -164,6 +164,25 @@ class ActiveDecoder:
         self.frames = 0
         self.bad_frames = 0
         self._first_hr = True
+        # PPG delivery stats, logged every 10 s (diagnose choppy graphs remotely)
+        self._st = {"t0": clock(), "ppg": 0, "railed": 0, "samples": 0, "gap": 0.0,
+                    "last": None, "bad": 0}
+
+    def _ppg_stats(self, n: int, railed: bool) -> None:
+        st, now = self._st, self.clock()
+        if st["last"] is not None:
+            st["gap"] = max(st["gap"], now - st["last"])
+        st["last"] = now
+        st["ppg"] += 1
+        st["samples"] += n
+        st["railed"] += int(railed)
+        span = now - st["t0"]
+        if span >= 10:
+            self.log(f"[ppg] {st['ppg']} frames/{span:.0f}s, {st['samples'] / span:.1f} samples/s, "
+                     f"max gap {st['gap'] * 1000:.0f} ms, railed {st['railed']}, "
+                     f"bad CRC {self.bad_frames - st['bad']}")
+            self._st = {"t0": now, "ppg": 0, "railed": 0, "samples": 0, "gap": 0.0,
+                        "last": now, "bad": self.bad_frames}
 
     def _bpm(self, b: int, src: str) -> None:
         if self._first_hr:
@@ -212,6 +231,7 @@ class ActiveDecoder:
         if raw is not None:
             self.ppg_frames += 1
             self.railed = sum(1 for x in raw if abs(x) >= RAIL) > len(raw) * 0.5
+            self._ppg_stats(len(raw), self.railed)
             if not self.railed:
                 wave, beats = self.ppg.feed(raw)
                 self.emit_pulse(wave, self.ppg.rate)
@@ -347,6 +367,15 @@ class _DongleLink:
             self.device.connect(row["address"], timeout=15), 20)
         self.conn.on("disconnection", lambda *_: self.disconnected.set())
         self.log("[active] link: connected; discovering services")
+        try:   # ~10x fewer packets per 2 KB PPG frame: steadier, lower-latency delivery
+            mtu = await asyncio.wait_for(self.conn.request_mtu(247), 5)
+            self.log(f"[active] link: MTU {mtu}")
+        except Exception as exc:
+            self.log(f"[active] link: MTU request failed ({exc!r})")
+        try:
+            await asyncio.wait_for(self.conn.set_data_length(251, 2120), 5)
+        except Exception as exc:
+            self.log(f"[active] link: data length unchanged ({type(exc).__name__})")
         self.peer = Peer(self.conn)
         await asyncio.wait_for(self.peer.discover_services(), 15)
         await asyncio.wait_for(self.peer.discover_characteristics(), 20)

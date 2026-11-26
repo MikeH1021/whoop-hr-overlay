@@ -410,3 +410,30 @@ def test_hidden_cursor_means_click_through(qapp, monkeypatch):
     monkeypatch.setattr(overlay, "windows_cursor_hidden", lambda: True)  # in a match
     w._check_cursor()
     assert w._passthrough and w._drag is None and not w._hover
+
+
+def test_ppg_playback_is_continuous_with_jittery_bursty_delivery(qapp, monkeypatch):
+    """Batches of 25 samples arriving 0.6-1.5 s apart from a band whose clock
+    runs 4% fast: the drawn window must always have data at its leading edge
+    and timestamps must never go backwards (no stalls, no overlap zigzags)."""
+    import random
+
+    import overlay
+
+    clock = [1000.0]
+    monkeypatch.setattr(overlay.time, "monotonic", lambda: clock[0])
+    w = overlay.OverlayWindow({"max_hr": 190}, {})
+    rnd = random.Random(7)
+    next_batch, edge_gaps = clock[0], []
+    while clock[0] < 1060:
+        if clock[0] >= next_batch:
+            w.add_pulse([float(i) for i in range(25)], 25.0)
+            next_batch += 25 / 26.0 + rnd.uniform(-0.35, 0.5)
+        if clock[0] > 1010:                        # after warm-up
+            t1 = clock[0] - w._ppg_delay()
+            newest = max(t for t, _ in w.pulse)
+            edge_gaps.append(t1 - newest)
+        clock[0] += 1 / 60
+    ts = [t for t, _ in w.pulse]
+    assert all(b > a for a, b in zip(ts, ts[1:]))           # monotonic
+    assert max(edge_gaps) <= 0.0, max(edge_gaps)             # never starved

@@ -288,6 +288,8 @@ class OverlayWindow(QtWidgets.QWidget):
         self.extras: dict = {}
         self.pulse_real_until = 0.0
         self._ppg_t = 0.0
+        self._ppg_arrival = None
+        self._ppg_gaps = collections.deque(maxlen=20)   # recent batch inter-arrival times
         self._phase = 0.0
         self._last = time.monotonic()
         self._last_gen = self._last
@@ -435,16 +437,43 @@ class OverlayWindow(QtWidgets.QWidget):
         if not samples or rate <= 0:
             return
         now = time.monotonic()
-        if self._ppg_t < now - 2.0 or self._ppg_t > now + 2.0:
-            self._ppg_t = now - len(samples) / rate
+        n = len(samples)
+        # Jitter buffer: track how late batches can arrive, and play back that
+        # far behind real time so the next batch is always in hand before the
+        # graph needs it (no stall-then-jump).
+        if self._ppg_arrival is not None:
+            gap = now - self._ppg_arrival
+            self._ppg_gaps.append(gap)
+        self._ppg_arrival = now
+        if self._ppg_t < now - 4.0 or self._ppg_t > now + 2.0:
+            self._ppg_t = now - n / rate          # first batch, or after a real outage
+            start, step = self._ppg_t, 1.0 / rate
+        else:
+            # Spread the batch so its end drifts gently toward "now": absorbs a
+            # band clock that isn't exactly 25 Hz without snapping or overlap.
+            start = self._ppg_t
+            nominal = start + n / rate
+            end = nominal + 0.25 * (now - nominal)
+            step = max(0.6 / rate, min(1.5 / rate, (end - start) / n))
+        t = start
         for v in samples:
-            self.pulse.append((self._ppg_t, float(v)))
-            self._ppg_t += 1.0 / rate
+            self.pulse.append((t, float(v)))
+            t += step
+        self._ppg_t = t
         self.pulse_real_until = now + 3.0
         self._trim_pulse(now)
 
+    def _ppg_delay(self) -> float:
+        """Playback delay for the real PPG: a little more than the worst recent
+        gap between batches (eased, so the graph doesn't lurch)."""
+        worst = max(self._ppg_gaps) if self._ppg_gaps else 1.0
+        target = max(0.8, min(3.0, worst + 0.35))
+        self._ppg_delay_v = getattr(self, "_ppg_delay_v", target)
+        self._ppg_delay_v += (target - self._ppg_delay_v) * (0.02 if target < self._ppg_delay_v else 0.2)
+        return self._ppg_delay_v
+
     def _trim_pulse(self, now: float) -> None:
-        cutoff = now - max(2, int(self.style["pulse_window_s"])) - 3
+        cutoff = now - max(2, int(self.style["pulse_window_s"])) - 4
         while self.pulse and self.pulse[0][0] < cutoff:
             self.pulse.popleft()
 
@@ -1060,7 +1089,7 @@ class OverlayWindow(QtWidgets.QWidget):
             self._text(p, capr, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, cap, muted)
             rect = rect.adjusted(0, 14 * k, 0, 0)
         now = time.monotonic()
-        delay = 1.0 if real else 0.0
+        delay = self._ppg_delay() if real else 0.0
         win = max(2, int(self.style["pulse_window_s"]))
         t1 = now - delay
         t0 = t1 - win
