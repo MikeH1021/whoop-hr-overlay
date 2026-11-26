@@ -1,4 +1,4 @@
-"""Settings window, opened from the overlay's gear (or a double-click). Every
+"""Settings window, opened from the overlay's gear. Every
 change applies live and saves immediately; there's no OK/Cancel."""
 from __future__ import annotations
 
@@ -517,5 +517,5 @@ class SettingsDialog(QtWidgets.QDialog):
         reset.clicked.connect(self.on_reset_geometry)
         f.addRow(reset)
         f.addRow(_hint("Move: drag the overlay. Resize: drag its bottom-right corner. "
-                       "Settings: the gear, or double-click the overlay."))
+                       "Settings: hover the overlay and click the gear."))
         return w

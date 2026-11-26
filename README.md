@@ -60,9 +60,11 @@ your heart spike the moment you get peeked in Counter-Strike. 😅
   stuttering if a huge overlay ever gets expensive.
 - **Responsive layout:** drag it to any size. It adapts from a compact strip to a tall
   vertical stack, hiding the pulse graph and stats when they won't fit.
-- **Gear on the overlay:** hover to reveal a gear (settings) and a resize corner. Drag to
-  move (it snaps to screen edges), and double-click to open settings. Everything saves
+- **Gear on the overlay:** hover to reveal a gear (settings), a padlock (lock position),
+  and a resize corner. Drag to move (it snaps to screen edges). Everything saves
   automatically, and the settings window opens beside the overlay.
+- **Game-safe:** while a game hides the cursor (you're in a match), every click passes
+  straight through to the game, so the overlay can't be moved or opened by accident.
 - **Lock** makes it fully click-through for gaming (unlock from the tray heart).
 - **Shows up in screen shares:** a normal desktop window, so Discord/OBS full-screen capture
   picks it up.

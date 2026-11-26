@@ -7,7 +7,7 @@ autoscale, continuously scrolling smooth curves), themeable (see THEMES), and
 the layout adapts to whatever size the user drags it to.
 
 Interaction: hover to reveal a gear (settings) and a resize grip; drag to move
-(snaps to screen edges); double-click for settings. "Locked" = click-through.
+(snaps to screen edges). While a game hides the cursor, clicks pass through.
 """
 from __future__ import annotations
 
@@ -236,6 +236,33 @@ class _Ease:
         return self.v
 
 
+def cursor_hidden_from(flags: int, hcursor) -> bool:
+    """GetCursorInfo result -> is the mouse cursor hidden (a game has it)?"""
+    CURSOR_SHOWING = 0x1
+    return not (flags & CURSOR_SHOWING) or not hcursor
+
+
+def windows_cursor_hidden():
+    """True while a game hides/captures the cursor; None if unknown / not Windows."""
+    if platform.system() != "Windows":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
+
+    try:
+        ci = CURSORINFO()
+        ci.cbSize = ctypes.sizeof(CURSORINFO)
+        if not ctypes.windll.user32.GetCursorInfo(ctypes.byref(ci)):
+            return None
+        return cursor_hidden_from(ci.flags, ci.hCursor)
+    except Exception:
+        return None
+
+
 class OverlayWindow(QtWidgets.QWidget):
     settings_requested = QtCore.Signal()
     geometry_changed = QtCore.Signal(int, int, int, int)
@@ -250,6 +277,9 @@ class OverlayWindow(QtWidgets.QWidget):
         self.snap = bool(opts.get("snap", True))
         self.pinned = bool(opts.get("pinned", False))   # position locked (still hoverable)
         self._pin_flash = -1e9                 # when a blocked drag was attempted
+        # In-game (cursor hidden/captured) every click passes through to the
+        # game, so stray in-game clicks can never move the overlay or open settings.
+        self._passthrough = False
 
         self.hr = collections.deque()          # (t, bpm)
         self.pulse = collections.deque()       # (t, value)
@@ -295,6 +325,20 @@ class OverlayWindow(QtWidgets.QWidget):
         self._timer.setTimerType(QtCore.Qt.PreciseTimer)
         self._timer.timeout.connect(self._tick)
         self._timer.start(int(1000 / self._fps))
+        if platform.system() == "Windows":
+            self._cursor_timer = QtCore.QTimer(self)
+            self._cursor_timer.timeout.connect(self._check_cursor)
+            self._cursor_timer.start(100)
+
+    def _check_cursor(self) -> None:
+        hidden = windows_cursor_hidden()
+        if hidden is None or hidden == self._passthrough:
+            return
+        self._passthrough = hidden
+        if hidden:
+            self._drag = self._resize = None
+            self._hover = False
+        self._apply_win32_styles()
 
     # ------------------------------------------------------------ placement --
     def _place(self, geometry) -> None:
@@ -344,7 +388,8 @@ class OverlayWindow(QtWidgets.QWidget):
             hwnd = int(self.winId())
             u = ctypes.windll.user32
             ex = u.GetWindowLongW(hwnd, GWL_EXSTYLE) | LAYERED | TOOLWINDOW | NOACTIVATE
-            ex = ex | TRANSPARENT if self.locked else ex & ~TRANSPARENT
+            through = self.locked or self._passthrough
+            ex = ex | TRANSPARENT if through else ex & ~TRANSPARENT
             u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex)
         except Exception:
             pass
@@ -491,9 +536,9 @@ class OverlayWindow(QtWidgets.QWidget):
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == QtCore.Qt.LeftButton:
-            self._drag = None
-            self.settings_requested.emit()
+        # Settings open only from the gear: a double-click on the body did it by
+        # accident far too easily during games.
+        event.accept()
 
     def mouseMoveEvent(self, event) -> None:
         gp = event.globalPosition().toPoint()
@@ -508,7 +553,7 @@ class OverlayWindow(QtWidgets.QWidget):
             p = event.position()
             if self._gear_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.PointingHandCursor)
-                QtWidgets.QToolTip.showText(gp, "Settings (or double-click)", self)
+                QtWidgets.QToolTip.showText(gp, "Settings", self)
             elif self._lock_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.PointingHandCursor)
                 QtWidgets.QToolTip.showText(

@@ -397,3 +397,16 @@ def test_position_lock_blocks_drag_and_resize(qapp):
     assert not w.pinned and toggles == [True, False]
     press(QtCore.QPoint(60, 100))
     assert w._drag is not None
+
+
+def test_hidden_cursor_means_click_through(qapp, monkeypatch):
+    import overlay
+
+    assert overlay.cursor_hidden_from(0, 1234)          # ShowCursor(FALSE)
+    assert overlay.cursor_hidden_from(1, 0)             # SetCursor(NULL)
+    assert not overlay.cursor_hidden_from(1, 1234)      # normal desktop cursor
+    w = overlay.OverlayWindow({"max_hr": 190}, {})
+    w._drag = object()
+    monkeypatch.setattr(overlay, "windows_cursor_hidden", lambda: True)  # in a match
+    w._check_cursor()
+    assert w._passthrough and w._drag is None and not w._hover
