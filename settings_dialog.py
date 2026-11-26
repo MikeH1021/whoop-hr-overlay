@@ -499,6 +499,11 @@ class SettingsDialog(QtWidgets.QDialog):
         f.addRow(lock)
         f.addRow(_hint("While locked there's no gear. Unlock from the heart icon in the "
                        "system tray."))
+        self.pin_box = QtWidgets.QCheckBox("Lock position (no accidental dragging)")
+        self.pin_box.setChecked(bool(self.cfg.get("pinned", False)))
+        self.pin_box.toggled.connect(lambda v: self._set_cfg("pinned", bool(v), "window"))
+        f.addRow(self.pin_box)
+        f.addRow(_hint("Also on the overlay: hover and click the padlock next to the gear."))
         snap = QtWidgets.QCheckBox("Snap to screen edges while dragging")
         snap.setChecked(bool(self.cfg.get("snap", True)))
         snap.toggled.connect(lambda v: self._set_cfg("snap", bool(v), "window"))

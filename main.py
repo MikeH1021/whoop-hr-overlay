@@ -162,6 +162,7 @@ def build_opts(args: argparse.Namespace, cfg: dict) -> dict:
         "movable": bool(pick("movable", False)),
         "geometry": cfg.get("geometry"),
         "locked": bool(cfg.get("locked", False)),
+        "pinned": bool(cfg.get("pinned", False)),
         "snap": bool(cfg.get("snap", True)),
     }
 
@@ -425,6 +426,9 @@ def main() -> None:
         elif what == "window":
             win.setWindowOpacity(float(cfg.get("opacity", 1.0)))
             win.set_snap(bool(cfg.get("snap", True)))
+            if bool(cfg.get("pinned", False)) != win.pinned:
+                win.set_pinned(bool(cfg.get("pinned", False)))
+                pin_action.setChecked(win.pinned)
             if bool(cfg.get("locked", False)) != win.locked:
                 win.set_locked(bool(cfg.get("locked", False)))
                 lock_action.setChecked(win.locked)
@@ -477,6 +481,25 @@ def main() -> None:
         win.set_locked(bool(on))
 
     lock_action.toggled.connect(toggle_lock)
+    pin_action = menu.addAction("Lock position")
+    pin_action.setCheckable(True)
+    pin_action.setChecked(win.pinned)
+
+    def set_pin(on: bool) -> None:
+        cfg["pinned"] = bool(on)
+        save_config(cfg)
+        if win.pinned != bool(on):
+            win.set_pinned(bool(on))
+        if pin_action.isChecked() != bool(on):
+            pin_action.setChecked(bool(on))
+        dlg = dialog_ref.get("dlg")
+        if dlg is not None and hasattr(dlg, "pin_box"):
+            dlg.pin_box.blockSignals(True)
+            dlg.pin_box.setChecked(bool(on))
+            dlg.pin_box.blockSignals(False)
+
+    pin_action.toggled.connect(set_pin)
+    win.pin_changed.connect(set_pin)
     radio = menu.addAction("")
     radio.setEnabled(False)
 
@@ -558,7 +581,7 @@ def main() -> None:
     os._exit(code)
 
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 
 
 class LanBeacon:

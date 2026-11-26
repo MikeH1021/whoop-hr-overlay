@@ -239,6 +239,7 @@ class _Ease:
 class OverlayWindow(QtWidgets.QWidget):
     settings_requested = QtCore.Signal()
     geometry_changed = QtCore.Signal(int, int, int, int)
+    pin_changed = QtCore.Signal(bool)          # position lock toggled on the overlay
 
     def __init__(self, opts: dict, style: dict | None = None) -> None:
         super().__init__()
@@ -247,6 +248,8 @@ class OverlayWindow(QtWidgets.QWidget):
         self.max_hr = int(opts.get("max_hr", 190))
         self.locked = bool(opts.get("locked", False))
         self.snap = bool(opts.get("snap", True))
+        self.pinned = bool(opts.get("pinned", False))   # position locked (still hoverable)
+        self._pin_flash = -1e9                 # when a blocked drag was attempted
 
         self.hr = collections.deque()          # (t, bpm)
         self.pulse = collections.deque()       # (t, value)
@@ -317,6 +320,10 @@ class OverlayWindow(QtWidgets.QWidget):
         self.setWindowFlag(QtCore.Qt.WindowTransparentForInput, self.locked)
         self.show()
         self._apply_win32_styles()
+
+    def set_pinned(self, on: bool) -> None:
+        self.pinned = bool(on)
+        self._drag = self._resize = None
 
     def set_snap(self, on: bool) -> None:
         self.snap = bool(on)
@@ -450,6 +457,10 @@ class OverlayWindow(QtWidgets.QWidget):
         g = max(14.0, 17 * self._k())
         return QtCore.QRectF(self.width() - g - 7, 7, g, g)
 
+    def _lock_rect(self) -> QtCore.QRectF:
+        g = self._gear_rect()
+        return g.translated(-(g.width() + 9), 0)
+
     def _grip_rect(self) -> QtCore.QRectF:
         g = max(12.0, 15 * self._k())
         return QtCore.QRectF(self.width() - g - 4, self.height() - g - 4, g, g)
@@ -467,6 +478,11 @@ class OverlayWindow(QtWidgets.QWidget):
         p = event.position()
         if self._gear_rect().adjusted(-4, -4, 4, 4).contains(p):
             self.settings_requested.emit()
+        elif self._lock_rect().adjusted(-4, -4, 4, 4).contains(p):
+            self.set_pinned(not self.pinned)
+            self.pin_changed.emit(self.pinned)
+        elif self.pinned:
+            self._pin_flash = time.monotonic()   # nudge: "it's locked"
         elif self._grip_rect().adjusted(-4, -4, 4, 4).contains(p):
             self._resize = (event.globalPosition().toPoint(), self.size())
         else:
@@ -493,6 +509,12 @@ class OverlayWindow(QtWidgets.QWidget):
             if self._gear_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.PointingHandCursor)
                 QtWidgets.QToolTip.showText(gp, "Settings (or double-click)", self)
+            elif self._lock_rect().adjusted(-4, -4, 4, 4).contains(p):
+                self.setCursor(QtCore.Qt.PointingHandCursor)
+                QtWidgets.QToolTip.showText(
+                    gp, "Unlock position" if self.pinned else "Lock position", self)
+            elif self.pinned:
+                self.setCursor(QtCore.Qt.ArrowCursor)
             elif self._grip_rect().adjusted(-4, -4, 4, 4).contains(p):
                 self.setCursor(QtCore.Qt.SizeFDiagCursor)
             else:
@@ -1058,6 +1080,39 @@ class OverlayWindow(QtWidgets.QWidget):
             self._text(p, QtCore.QRectF(x, tr.bottom() + 4 * k, w - x - pad, h - tr.bottom() - pad),
                        flags_wrap, detail, muted)
 
+    def _paint_lock(self, p, k, text, chip) -> None:
+        """Padlock chip left of the gear: closed + accent-tinted when pinned.
+        Pulses briefly when a drag is blocked so it's obvious why nothing moved."""
+        r = self._lock_rect()
+        c = r.center()
+        flash = max(0.0, 1.0 - (time.monotonic() - self._pin_flash) / 0.6)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(chip)
+        grow = 3 + 3 * flash
+        p.drawEllipse(c, r.width() / 2 + grow, r.height() / 2 + grow)
+        col = QtGui.QColor(self._col or self._target_accent()) if self.pinned else QtGui.QColor(text)
+        s = r.width()
+        body = QtCore.QRectF(c.x() - s * 0.32, c.y() - s * 0.04, s * 0.64, s * 0.46)
+        pen = QtGui.QPen(col, max(1.2, s * 0.11))
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        sh = QtCore.QRectF(c.x() - s * 0.2, c.y() - s * 0.4, s * 0.4, s * 0.5)
+        if self.pinned:
+            p.drawArc(sh, 0, 180 * 16)
+            p.drawLine(QtCore.QPointF(sh.left(), sh.center().y()),
+                       QtCore.QPointF(sh.left(), body.top()))
+            p.drawLine(QtCore.QPointF(sh.right(), sh.center().y()),
+                       QtCore.QPointF(sh.right(), body.top()))
+        else:  # open shackle, swung up on the right
+            o = sh.translated(s * 0.16, -s * 0.12)
+            p.drawArc(o, 0, 180 * 16)
+            p.drawLine(QtCore.QPointF(o.left(), o.center().y()),
+                       QtCore.QPointF(o.left(), body.top()))
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(col)
+        p.drawRoundedRect(body, s * 0.08, s * 0.08)
+
     def _paint_controls(self, p, k, text, alpha) -> None:
         p.save()
         p.setOpacity(alpha)
@@ -1081,6 +1136,10 @@ class OverlayWindow(QtWidgets.QWidget):
         hole = QtGui.QPainterPath()
         hole.addEllipse(c, rad * 0.3, rad * 0.3)
         p.drawPath(gear.simplified().subtracted(hole))
+        self._paint_lock(p, k, text, chip)
+        if self.pinned:
+            p.restore()
+            return
         gr = self._grip_rect()
         pen = QtGui.QPen(text, max(1.0, 1.4 * k))
         pen.setCapStyle(QtCore.Qt.RoundCap)

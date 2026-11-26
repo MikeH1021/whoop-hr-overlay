@@ -364,3 +364,36 @@ def test_hub_source_runs_sources_one_after_another():
     f2.result(3)
     assert order == ["a+", "a-", "b+", "b-"]
     hub.loop.call_soon_threadsafe(hub.loop.stop)
+
+
+def test_position_lock_blocks_drag_and_resize(qapp):
+    from PySide6 import QtCore, QtGui
+
+    import overlay
+
+    w = overlay.OverlayWindow({"max_hr": 190, "geometry": [100, 100, 300, 170]}, {})
+    toggles = []
+    w.pin_changed.connect(toggles.append)
+
+    def press(pt):
+        e = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, QtCore.QPointF(pt),
+                              QtCore.QPointF(w.mapToGlobal(pt)), QtCore.Qt.LeftButton,
+                              QtCore.Qt.LeftButton, QtCore.Qt.NoModifier)
+        w.mousePressEvent(e)
+
+    press(w._lock_rect().center().toPoint())            # click the padlock
+    assert w.pinned and toggles == [True]
+    press(QtCore.QPoint(60, 100))                          # try to drag the body
+    assert w._drag is None
+    press(w._grip_rect().center().toPoint())               # try to resize
+    assert w._resize is None
+    w._hover = True
+    img = QtGui.QImage(w.size(), QtGui.QImage.Format_ARGB32_Premultiplied)
+    for _ in range(3):
+        w._tick()
+        w._paint(None)
+    w.render(img)
+    press(w._lock_rect().center().toPoint())            # unlock
+    assert not w.pinned and toggles == [True, False]
+    press(QtCore.QPoint(60, 100))
+    assert w._drag is not None
